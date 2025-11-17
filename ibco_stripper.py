@@ -1220,6 +1220,262 @@ class PDFStripper:
 
         return str(output_path)
 
+    def generate_report(self, output_file: str = "cafr_report.txt") -> str:
+        """
+        Generate human-readable text report.
+
+        Creates a formatted text report containing:
+        - PDF information and processing date
+        - Table of Contents
+        - Page mapping summary by section
+        - Issues and warnings
+        - Output files listing
+        - Summary statistics
+
+        Args:
+            output_file: Path to output report file (default: "cafr_report.txt")
+
+        Returns:
+            Path to created report file
+
+        Raises:
+            ValueError: If page_metadata not built
+        """
+        if not self.page_metadata:
+            raise ValueError("Page index not built. Call build_page_index() first.")
+
+        logger.info("=" * 60)
+        logger.info("Generating human-readable report")
+        logger.info("=" * 60)
+
+        # Prepare output path
+        output_path = Path(output_file)
+        if not output_path.is_absolute():
+            output_path = self.output_dir / output_path
+
+        # Build report content
+        lines = []
+
+        # Header
+        lines.append("=" * 70)
+        lines.append("CAFR PROCESSING REPORT")
+        lines.append("=" * 70)
+        lines.append("")
+        lines.append(f"PDF: {self.pdf_path.name}")
+        lines.append(f"Total Pages: {len(self.page_metadata)}")
+        lines.append(f"Processed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("")
+
+        # Table of Contents
+        lines.append("TABLE OF CONTENTS")
+        lines.append("-" * 70)
+
+        for entry in self.toc_entries:
+            # Indentation based on level
+            indent = "  " * (entry.level - 1)
+            section_display = f"{indent}{entry.section_name}"
+
+            # Calculate dots to align page numbers
+            dots_length = 50 - len(section_display)
+            dots = "." * max(2, dots_length)
+
+            lines.append(f"{section_display} {dots} {entry.page_number}")
+
+        lines.append("")
+
+        # Page Mapping Summary
+        lines.append("PAGE MAPPING SUMMARY")
+        lines.append("-" * 70)
+
+        # Group pages by main section (level 1)
+        main_sections = [e for e in self.toc_entries if e.level == 1]
+
+        for i, section_entry in enumerate(main_sections):
+            section_name = section_entry.section_name
+            section_start = section_entry.page_number
+
+            # Find end page (start of next section or last page)
+            if i + 1 < len(main_sections):
+                section_end = main_sections[i + 1].page_number - 1
+            else:
+                # Last section - find highest page number in this section
+                section_pages = [
+                    p for p in self.page_metadata
+                    if p.section_name == section_name or p.parent_section_name == section_name
+                ]
+                if section_pages:
+                    section_end = max(
+                        p.pdf_page_num for p in section_pages
+                        if p.footer_page_num  # Only count pages with numbers
+                    ) if any(p.footer_page_num for p in section_pages) else section_start
+                else:
+                    section_end = section_start
+
+            # Count pages and PNG files in this section
+            section_pages = [
+                p for p in self.page_metadata
+                if p.section_name == section_name or p.parent_section_name == section_name
+            ]
+
+            page_count = len(section_pages)
+            png_count = sum(1 for p in section_pages if p.png_file)
+
+            # Status
+            if png_count == page_count and page_count > 0:
+                status = "✓ Complete"
+            elif png_count > 0:
+                status = f"⚠ Partial ({png_count}/{page_count})"
+            else:
+                status = "✗ No PNGs"
+
+            lines.append(f"Section: {section_name}")
+            lines.append(f"  Pages: {section_start}-{section_end} ({page_count} pages)")
+            lines.append(f"  PNG Files: {png_count} created")
+            lines.append(f"  Status: {status}")
+            lines.append("")
+
+        # Issues/Warnings
+        lines.append("ISSUES/WARNINGS")
+        lines.append("-" * 70)
+
+        issues = []
+
+        # Check for pages without page numbers
+        pages_without_numbers = [p for p in self.page_metadata if not p.footer_page_num]
+        if pages_without_numbers:
+            # Group consecutive pages
+            page_ranges = self._group_consecutive_pages([p.pdf_page_num for p in pages_without_numbers])
+            for start, end in page_ranges:
+                if start == end:
+                    issues.append(f"- Page {start}: No page number detected")
+                else:
+                    issues.append(f"- Pages {start}-{end}: No page numbers detected")
+
+        # Check for pages without sections
+        pages_without_sections = [p for p in self.page_metadata if not p.section_name]
+        if pages_without_sections:
+            page_ranges = self._group_consecutive_pages([p.pdf_page_num for p in pages_without_sections])
+            for start, end in page_ranges:
+                if start == end:
+                    issues.append(f"- Page {start}: Not mapped to any section")
+                else:
+                    issues.append(f"- Pages {start}-{end}: Not mapped to any section")
+
+        # Check for very long headers (truncation warning)
+        for page in self.page_metadata:
+            if page.header_text and len(page.header_text) > 100:
+                issues.append(f"- Page {page.pdf_page_num}: Header text very long ({len(page.header_text)} chars)")
+
+        # Check for pages without PNG files
+        pages_without_png = [p for p in self.page_metadata if not p.png_file]
+        if pages_without_png and any(p.png_file for p in self.page_metadata):
+            # Only warn if some PNGs were created
+            page_ranges = self._group_consecutive_pages([p.pdf_page_num for p in pages_without_png])
+            for start, end in page_ranges:
+                if start == end:
+                    issues.append(f"- Page {start}: PNG file not created")
+                else:
+                    issues.append(f"- Pages {start}-{end}: PNG files not created")
+
+        if issues:
+            for issue in issues:
+                lines.append(issue)
+        else:
+            lines.append("- No issues detected")
+
+        lines.append("")
+
+        # Output Files
+        lines.append("OUTPUT FILES")
+        lines.append("-" * 70)
+
+        # Check for metadata file
+        metadata_file = self.output_dir / "cafr_metadata.json"
+        if metadata_file.exists():
+            lines.append(f"Metadata: {metadata_file.relative_to(self.output_dir.parent)}")
+        else:
+            lines.append(f"Metadata: Not yet created")
+
+        # Report file (this file)
+        lines.append(f"Report: {output_path.relative_to(self.output_dir.parent) if output_path.is_relative_to(self.output_dir.parent) else output_path}")
+
+        # PNG files directory
+        png_count = sum(1 for p in self.page_metadata if p.png_file)
+        if png_count > 0:
+            lines.append(f"PNG Files: {self.output_dir}/ ({png_count} files)")
+        else:
+            lines.append(f"PNG Files: Not yet created")
+
+        lines.append("")
+
+        # Summary Statistics
+        lines.append("SUMMARY STATISTICS")
+        lines.append("-" * 70)
+
+        pages_with_numbers = sum(1 for p in self.page_metadata if p.footer_page_num)
+        pages_with_sections = sum(1 for p in self.page_metadata if p.section_name)
+        png_files_created = sum(1 for p in self.page_metadata if p.png_file)
+        main_sections_count = len([e for e in self.toc_entries if e.level == 1])
+        subsections_count = len([e for e in self.toc_entries if e.level > 1])
+
+        lines.append(f"Total Pages: {len(self.page_metadata)}")
+        lines.append(f"Pages with Numbers: {pages_with_numbers}")
+        lines.append(f"Pages Mapped to Sections: {pages_with_sections}")
+        lines.append(f"PNG Files Created: {png_files_created}")
+        lines.append(f"TOC Entries: {len(self.toc_entries)}")
+        lines.append(f"  Main Sections: {main_sections_count}")
+        lines.append(f"  Subsections: {subsections_count}")
+
+        lines.append("")
+        lines.append("=" * 70)
+
+        # Write report file
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+
+        logger.info(f"✓ Report generated: {output_path}")
+        logger.info(f"  {len(lines)} lines")
+        logger.info(f"  {len(issues)} issues/warnings")
+
+        return str(output_path)
+
+    def _group_consecutive_pages(self, page_numbers: List[int]) -> List[Tuple[int, int]]:
+        """
+        Group consecutive page numbers into ranges.
+
+        Args:
+            page_numbers: List of page numbers
+
+        Returns:
+            List of (start, end) tuples for consecutive ranges
+        """
+        if not page_numbers:
+            return []
+
+        # Sort page numbers
+        sorted_pages = sorted(page_numbers)
+
+        ranges = []
+        start = sorted_pages[0]
+        end = sorted_pages[0]
+
+        for i in range(1, len(sorted_pages)):
+            if sorted_pages[i] == end + 1:
+                # Consecutive
+                end = sorted_pages[i]
+            else:
+                # Gap - save current range and start new one
+                ranges.append((start, end))
+                start = sorted_pages[i]
+                end = sorted_pages[i]
+
+        # Save last range
+        ranges.append((start, end))
+
+        return ranges
+
     def process_cafr(self, toc_screenshots: List[str], dpi: int = 300) -> Dict[str, Any]:
         """
         Process a complete CAFR PDF.
