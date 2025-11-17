@@ -1,0 +1,18 @@
+# Core PDF Processing
+pdfplumber>=0.10.0
+pdf2image>=1.16.0
+
+# OCR for TOC Screenshots
+pytesseract>=0.3.10
+
+# Image Processing
+Pillow>=10.0.0
+
+# Progress Bars & UI
+tqdm>=4.66.0
+
+# Data Handling
+pyyaml>=6.0
+
+# Optional: Advanced PDF handling
+PyPDF2>=3.0.0
