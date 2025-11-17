@@ -240,15 +240,160 @@ class PDFStripper:
         """
         Load TOC from a screenshot using OCR.
 
+        Uses pytesseract to OCR the image and parse TOC entries.
+        Handles various TOC formats commonly found in CAFRs.
+
         Args:
             image_path: Path to TOC screenshot
 
         Returns:
             List of TOC entries
+
+        Raises:
+            FileNotFoundError: If image file doesn't exist
+            Exception: If OCR fails
         """
-        # TODO: Implement in next prompt (2A)
-        logger.info(f"TOC loading not yet implemented: {image_path}")
-        return []
+        image_path = Path(image_path)
+        if not image_path.exists():
+            raise FileNotFoundError(f"TOC screenshot not found: {image_path}")
+
+        logger.info(f"Loading TOC from screenshot: {image_path.name}")
+
+        try:
+            # Load image
+            image = Image.open(image_path)
+
+            # Pre-process image for better OCR (from config)
+            if config.OCR_CONFIG['convert_to_grayscale']:
+                image = image.convert('L')
+
+            if config.OCR_CONFIG['increase_contrast']:
+                from PIL import ImageEnhance
+                enhancer = ImageEnhance.Contrast(image)
+                image = enhancer.enhance(1.5)
+
+            # Perform OCR
+            ocr_config = config.OCR_CONFIG['tesseract_config']
+            ocr_text = pytesseract.image_to_string(image, config=ocr_config)
+
+            if not ocr_text or not ocr_text.strip():
+                logger.warning(f"No text extracted from {image_path.name}")
+                logger.warning("OCR may have failed or image quality is poor")
+                return []
+
+            logger.debug(f"OCR extracted {len(ocr_text)} characters")
+
+            # Parse TOC entries from OCR text
+            toc_entries = self._parse_toc_text(ocr_text)
+
+            logger.info(f"Parsed {len(toc_entries)} TOC entries from {image_path.name}")
+
+            if len(toc_entries) == 0:
+                logger.warning("No TOC entries found. Please verify:")
+                logger.warning("  1. Screenshot contains table of contents")
+                logger.warning("  2. Image quality is good (clear, high resolution)")
+                logger.warning("  3. Text is readable in the image")
+
+            return toc_entries
+
+        except ImportError:
+            logger.error("pytesseract not installed or tesseract-ocr not found")
+            logger.error("Install: sudo apt-get install tesseract-ocr")
+            logger.error("Install: pip install pytesseract")
+            raise
+
+        except Exception as e:
+            logger.error(f"Error processing TOC screenshot: {e}")
+            raise
+
+    def _parse_toc_text(self, ocr_text: str) -> List[TOCEntry]:
+        """
+        Parse TOC entries from OCR text.
+
+        Recognizes common CAFR TOC formats:
+        - "Section Name .................. 15"
+        - "Section Name    15"
+        - "Management's Discussion ... Page 25"
+        - "1. Introductory Section ...... 1"
+        - "A. Letter of Transmittal ..... 3"
+
+        Args:
+            ocr_text: Raw OCR text from TOC screenshot
+
+        Returns:
+            List of TOCEntry objects
+        """
+        toc_entries = []
+        lines = ocr_text.split('\n')
+
+        for line in lines:
+            # Skip empty lines
+            if not line.strip():
+                continue
+
+            # Try to parse TOC entry from this line
+            entry = self._parse_toc_line(line)
+            if entry:
+                toc_entries.append(entry)
+
+        return toc_entries
+
+    def _parse_toc_line(self, line: str) -> Optional[TOCEntry]:
+        """
+        Parse a single line of TOC text into a TOCEntry.
+
+        Args:
+            line: Single line from TOC
+
+        Returns:
+            TOCEntry object or None if not a valid entry
+        """
+        # Get TOC patterns from config
+        patterns = config.TOC_PARSING['patterns']
+
+        # Determine indentation level (for subsections)
+        leading_spaces = len(line) - len(line.lstrip(' '))
+        level = 1  # Default: main section
+
+        if leading_spaces >= config.TOC_PARSING['level_3_indent']:
+            level = 3
+        elif leading_spaces >= config.TOC_PARSING['level_2_indent']:
+            level = 2
+
+        # Try each pattern
+        for pattern in patterns:
+            match = re.search(pattern, line)
+            if match:
+                # Extract section name and page number
+                section_name = match.group(1).strip()
+                page_str = match.group(2).strip()
+
+                # Clean section name
+                if config.TOC_PARSING['remove_dots']:
+                    section_name = re.sub(r'\.+\s*$', '', section_name)
+                    section_name = section_name.strip()
+
+                # Convert page number to integer
+                try:
+                    # Handle "Page 25" format
+                    if 'page' in page_str.lower():
+                        page_str = re.search(r'\d+', page_str).group()
+
+                    page_number = int(page_str)
+
+                    # Create TOC entry
+                    return TOCEntry(
+                        section_name=section_name,
+                        page_number=page_number,
+                        level=level,
+                        parent=None  # Will be set later if needed
+                    )
+
+                except (ValueError, AttributeError):
+                    # Not a valid page number
+                    continue
+
+        return None
 
     def process_cafr(self, toc_screenshots: List[str], dpi: int = 300) -> Dict[str, Any]:
         """
