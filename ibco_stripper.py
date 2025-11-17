@@ -713,6 +713,88 @@ class PDFStripper:
                 most_specific_section.level,
                 parent_name)
 
+    def build_page_index(self, toc_entries: List[TOCEntry] = None) -> List[PageMetadata]:
+        """
+        Build complete page index for the PDF.
+
+        Iterates through all PDF pages and creates PageMetadata for each:
+        - Extracts footer page number
+        - Extracts header text
+        - Maps to TOC section
+        - Handles edge cases (pages before sections, missing numbers)
+
+        Args:
+            toc_entries: List of TOC entries (uses self.toc_entries if not provided)
+
+        Returns:
+            List of PageMetadata objects for all pages
+        """
+        if toc_entries is None:
+            toc_entries = self.toc_entries
+
+        page_count = self.get_page_count()
+        page_index = []
+
+        logger.info(f"Building page index for {page_count} pages...")
+
+        with pdfplumber.open(self.pdf_path) as pdf:
+            for pdf_page_num in range(1, page_count + 1):
+                # Progress indicator
+                if pdf_page_num % 10 == 0 or pdf_page_num == 1 or pdf_page_num == page_count:
+                    print(f"Processing page {pdf_page_num}/{page_count}...")
+
+                page = pdf.pages[pdf_page_num - 1]  # pdfplumber uses 0-based indexing
+
+                # Extract footer page number
+                footer_page_num = self.read_footer_page_number(page)
+
+                # Extract header text
+                header_text = self.read_header_text(page)
+
+                # Map to TOC section
+                # Need to convert footer page number to int for section mapping
+                section_name = None
+                section_level = 0
+                parent_section_name = None
+
+                if footer_page_num:
+                    # Convert footer page number to integer
+                    page_num_int = self._convert_page_to_int(footer_page_num)
+                    if page_num_int:
+                        # Map using the document page number
+                        section_name, section_level, parent_section_name = self.map_page_to_section(
+                            page_num_int, toc_entries
+                        )
+
+                # Create PageMetadata
+                metadata = PageMetadata(
+                    pdf_page_num=pdf_page_num,
+                    footer_page_num=footer_page_num,
+                    section_name=section_name,
+                    section_level=section_level,
+                    header_text=header_text,
+                    parent_section_name=parent_section_name,
+                    png_file=None  # Will be populated during PNG conversion
+                )
+
+                page_index.append(metadata)
+
+        # Store internally
+        self.page_metadata = page_index
+
+        logger.info(f"✓ Page index built: {len(page_index)} pages processed")
+
+        # Summary stats
+        pages_with_numbers = sum(1 for p in page_index if p.footer_page_num)
+        pages_with_sections = sum(1 for p in page_index if p.section_name)
+        pages_with_headers = sum(1 for p in page_index if p.header_text)
+
+        logger.info(f"  Pages with footer numbers: {pages_with_numbers}/{len(page_index)}")
+        logger.info(f"  Pages mapped to sections: {pages_with_sections}/{len(page_index)}")
+        logger.info(f"  Pages with header text: {pages_with_headers}/{len(page_index)}")
+
+        return page_index
+
     def process_cafr(self, toc_screenshots: List[str], dpi: int = 300) -> Dict[str, Any]:
         """
         Process a complete CAFR PDF.
