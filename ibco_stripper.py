@@ -434,6 +434,191 @@ class PDFStripper:
 
         return None
 
+    def load_toc_from_screenshots(self, image_paths: List[str]) -> List[TOCEntry]:
+        """
+        Load TOC from multiple screenshot files.
+
+        Some CAFRs have multi-page table of contents. This method processes
+        multiple screenshots in order, combines entries, removes duplicates,
+        and returns a complete sorted TOC structure.
+
+        Args:
+            image_paths: List of paths to TOC screenshot files
+
+        Returns:
+            List of TOCEntry objects, sorted by page number with duplicates removed
+        """
+        logger.info(f"Loading TOC from {len(image_paths)} screenshot(s)")
+
+        all_entries = []
+
+        for i, image_path in enumerate(image_paths, start=1):
+            logger.info(f"Processing screenshot {i}/{len(image_paths)}: {Path(image_path).name}")
+
+            # Load entries from this screenshot
+            entries = self.load_toc_from_screenshot(image_path)
+            all_entries.extend(entries)
+
+        logger.info(f"Total entries before deduplication: {len(all_entries)}")
+
+        # Remove duplicates
+        unique_entries = self._remove_duplicate_entries(all_entries)
+
+        logger.info(f"Total entries after deduplication: {len(unique_entries)}")
+
+        # Sort by page number (should already be sorted, but ensure it)
+        if config.TOC_PARSING['sort_by_page']:
+            unique_entries.sort(key=lambda e: e.page_number)
+
+        return unique_entries
+
+    def _remove_duplicate_entries(self, entries: List[TOCEntry]) -> List[TOCEntry]:
+        """
+        Remove duplicate TOC entries.
+
+        Duplicates are identified by having the same section name and page number.
+
+        Args:
+            entries: List of TOC entries (may contain duplicates)
+
+        Returns:
+            List of unique TOC entries
+        """
+        seen = set()
+        unique = []
+
+        for entry in entries:
+            # Create a key for duplicate detection
+            key = (entry.section_name.lower().strip(), entry.page_number)
+
+            if key not in seen:
+                seen.add(key)
+                unique.append(entry)
+            else:
+                logger.debug(f"Removing duplicate: {entry.section_name} (page {entry.page_number})")
+
+        return unique
+
+    def verify_toc_completeness(self) -> Dict[str, Any]:
+        """
+        Verify TOC completeness and detect potential issues.
+
+        Checks for:
+        - Gaps in page number sequence
+        - Missing major sections
+        - Minimum section count
+
+        Returns:
+            Dictionary with verification results and warnings
+        """
+        if not self.toc_entries:
+            return {
+                "is_complete": False,
+                "warnings": ["No TOC entries loaded"],
+                "errors": ["Cannot verify - no TOC entries"],
+                "gaps": [],
+                "main_section_count": 0
+            }
+
+        warnings = []
+        errors = []
+        gaps = []
+
+        # Count main sections (level 1)
+        main_sections = [e for e in self.toc_entries if e.level == 1]
+        main_section_count = len(main_sections)
+
+        # Check for minimum main sections
+        if main_section_count < 3:
+            warnings.append(f"Only {main_section_count} main section(s) found - typical CAFRs have 3+ "
+                           "(Introductory, Financial, Statistical)")
+
+        # Check for page number gaps
+        page_numbers = sorted([e.page_number for e in self.toc_entries])
+
+        for i in range(len(page_numbers) - 1):
+            current = page_numbers[i]
+            next_page = page_numbers[i + 1]
+            gap_size = next_page - current
+
+            # If gap is larger than 100 pages, it might indicate missing sections
+            if gap_size > 100:
+                gaps.append({
+                    "after_page": current,
+                    "before_page": next_page,
+                    "gap_size": gap_size
+                })
+                warnings.append(f"Large gap: {gap_size} pages between page {current} and {next_page}")
+
+        # Check for common CAFR sections
+        section_names_lower = [e.section_name.lower() for e in self.toc_entries]
+
+        expected_keywords = ["introductory", "financial", "statistical"]
+        missing_keywords = []
+
+        for keyword in expected_keywords:
+            if not any(keyword in name for name in section_names_lower):
+                missing_keywords.append(keyword)
+
+        if missing_keywords:
+            warnings.append(f"Common CAFR sections not found: {', '.join(missing_keywords)}")
+
+        # Determine completeness
+        is_complete = len(errors) == 0 and len(warnings) <= 1
+
+        return {
+            "is_complete": is_complete,
+            "warnings": warnings,
+            "errors": errors,
+            "gaps": gaps,
+            "main_section_count": main_section_count,
+            "total_entries": len(self.toc_entries),
+            "page_range": f"{page_numbers[0]}-{page_numbers[-1]}" if page_numbers else "N/A"
+        }
+
+    def print_toc(self):
+        """
+        Print TOC for user review before processing.
+
+        Displays all TOC entries with hierarchy visualization.
+        """
+        if not self.toc_entries:
+            print("No TOC entries loaded.")
+            return
+
+        print("=" * 80)
+        print("TABLE OF CONTENTS - Review")
+        print("=" * 80)
+        print()
+
+        print(f"{'Section Name':<55} {'Page':<8} {'Level'}")
+        print("-" * 80)
+
+        for entry in self.toc_entries:
+            # Visual indentation based on level
+            indent = "  " * (entry.level - 1)
+            section_display = f"{indent}{entry.section_name}"
+
+            # Truncate if too long
+            if len(section_display) > 52:
+                section_display = section_display[:49] + "..."
+
+            print(f"{section_display:<55} {entry.page_number:<8} {entry.level}")
+
+        print()
+        print(f"Total entries: {len(self.toc_entries)}")
+
+        # Show main section count
+        main_sections = [e for e in self.toc_entries if e.level == 1]
+        print(f"Main sections: {len(main_sections)}")
+
+        # Show page range
+        if self.toc_entries:
+            page_numbers = [e.page_number for e in self.toc_entries]
+            print(f"Page range: {min(page_numbers)}-{max(page_numbers)}")
+
+        print("=" * 80)
+
     def process_cafr(self, toc_screenshots: List[str], dpi: int = 300) -> Dict[str, Any]:
         """
         Process a complete CAFR PDF.
@@ -453,13 +638,40 @@ class PDFStripper:
         page_count = self.get_page_count()
         logger.info(f"PDF contains {page_count} pages")
 
-        # Load TOC
+        # Load TOC from multiple screenshots
         logger.info("Loading TOC from screenshots...")
-        for screenshot in toc_screenshots:
-            entries = self.load_toc_from_screenshot(screenshot)
-            self.toc_entries.extend(entries)
+        self.toc_entries = self.load_toc_from_screenshots(toc_screenshots)
 
         logger.info(f"Loaded {len(self.toc_entries)} TOC entries")
+
+        # Print TOC for review
+        self.print_toc()
+
+        # Verify TOC completeness
+        verification = self.verify_toc_completeness()
+
+        print()
+        print("=" * 80)
+        print("TOC Verification")
+        print("=" * 80)
+
+        if verification["is_complete"]:
+            print("✓ TOC appears complete")
+        else:
+            print("⚠ TOC may be incomplete - please review")
+
+        if verification["warnings"]:
+            print("\nWarnings:")
+            for warning in verification["warnings"]:
+                print(f"  ⚠ {warning}")
+
+        if verification["errors"]:
+            print("\nErrors:")
+            for error in verification["errors"]:
+                print(f"  ✗ {error}")
+
+        print("=" * 80)
+        print()
 
         # Processing summary
         summary = {
