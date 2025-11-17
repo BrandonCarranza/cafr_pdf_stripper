@@ -902,7 +902,7 @@ class PDFStripper:
 
         return str(output_path)
 
-    def save_all_pages_as_png(self, dpi: int = 300) -> List[str]:
+    def save_all_pages_as_png(self, dpi: int = 300, skip_existing: bool = False) -> List[str]:
         """
         Convert all PDF pages to PNG with section-based organization.
 
@@ -918,6 +918,7 @@ class PDFStripper:
 
         Args:
             dpi: DPI for PNG conversion (default 300)
+            skip_existing: If True, skip pages that already have PNG files (default False)
 
         Returns:
             List of saved file paths
@@ -935,6 +936,7 @@ class PDFStripper:
 
         # Prepare conversion tasks
         conversion_tasks = []
+        saved_files = []  # Initialize before loop
         section_counters = {}  # Track section numbers for folder naming
 
         # First pass: assign section numbers
@@ -966,6 +968,12 @@ class PDFStripper:
             # Full output path
             output_path = self.output_dir / folder_name / filename
 
+            # Skip if file exists and skip_existing is True
+            if skip_existing and output_path.exists():
+                # Still track it as saved
+                saved_files.append(str(output_path))
+                continue
+
             conversion_tasks.append({
                 'pdf_path': str(self.pdf_path),
                 'page_number': metadata.pdf_page_num,
@@ -974,10 +982,18 @@ class PDFStripper:
                 'metadata_index': self.page_metadata.index(metadata)
             })
 
-        # Convert pages using multiprocessing
-        logger.info(f"Converting {len(conversion_tasks)} pages at {dpi} DPI...")
+        # Report skipped files
+        if skip_existing:
+            skipped_count = len(self.page_metadata) - len(conversion_tasks)
+            if skipped_count > 0:
+                logger.info(f"Skipping {skipped_count} existing files")
 
-        saved_files = []
+        # Convert pages using multiprocessing
+        if conversion_tasks:
+            logger.info(f"Converting {len(conversion_tasks)} pages at {dpi} DPI...")
+        else:
+            logger.info("All pages already converted")
+            return saved_files
 
         # Use multiprocessing pool
         with Pool(processes=max_workers) as pool:
@@ -998,6 +1014,110 @@ class PDFStripper:
             sections_created.add(folder)
 
         logger.info(f"  Created {len(sections_created)} section folders")
+
+        return saved_files
+
+    def save_section_as_png(self, section_name: str, dpi: int = 300, skip_existing: bool = False) -> List[str]:
+        """
+        Convert pages from a specific section to PNG.
+
+        Useful for:
+        - Testing with small subset
+        - Re-exporting specific sections
+        - Handling failed conversions
+
+        Args:
+            section_name: Name of section to export (must match TOC section name)
+            dpi: DPI for PNG conversion (default 300)
+            skip_existing: If True, skip pages that already have PNG files (default False)
+
+        Returns:
+            List of saved file paths
+        """
+        if not self.page_metadata:
+            raise ValueError("Page index not built. Call build_page_index() first.")
+
+        # Filter pages for this section
+        # Match pages where section_name matches OR parent_section_name matches (for subsections)
+        section_pages = [
+            m for m in self.page_metadata
+            if m.section_name == section_name or m.parent_section_name == section_name
+        ]
+
+        if not section_pages:
+            logger.warning(f"No pages found for section: {section_name}")
+            return []
+
+        logger.info("=" * 60)
+        logger.info(f"Converting section: {section_name}")
+        logger.info("=" * 60)
+        logger.info(f"Section contains {len(section_pages)} pages")
+
+        # Temporarily replace page_metadata with filtered list
+        original_metadata = self.page_metadata
+        self.page_metadata = section_pages
+
+        try:
+            # Use existing save_all_pages_as_png with filtered metadata
+            saved_files = self.save_all_pages_as_png(dpi=dpi, skip_existing=skip_existing)
+        finally:
+            # Restore original metadata
+            self.page_metadata = original_metadata
+
+        return saved_files
+
+    def save_page_range_as_png(self, start_page: int, end_page: int, dpi: int = 300, skip_existing: bool = False) -> List[str]:
+        """
+        Convert a range of PDF pages to PNG.
+
+        Useful for:
+        - Testing with small subset
+        - Re-exporting specific page ranges
+        - Handling failed conversions
+
+        Args:
+            start_page: First PDF page number (1-based, inclusive)
+            end_page: Last PDF page number (1-based, inclusive)
+            dpi: DPI for PNG conversion (default 300)
+            skip_existing: If True, skip pages that already have PNG files (default False)
+
+        Returns:
+            List of saved file paths
+        """
+        if not self.page_metadata:
+            raise ValueError("Page index not built. Call build_page_index() first.")
+
+        # Validate range
+        if start_page < 1:
+            raise ValueError("start_page must be >= 1")
+        if end_page < start_page:
+            raise ValueError("end_page must be >= start_page")
+
+        # Filter pages in range
+        range_pages = [
+            m for m in self.page_metadata
+            if start_page <= m.pdf_page_num <= end_page
+        ]
+
+        if not range_pages:
+            logger.warning(f"No pages found in range {start_page}-{end_page}")
+            return []
+
+        logger.info("=" * 60)
+        logger.info(f"Converting page range: {start_page}-{end_page}")
+        logger.info("=" * 60)
+        logger.info(f"Range contains {len(range_pages)} pages")
+
+        # Temporarily replace page_metadata with filtered list
+        original_metadata = self.page_metadata
+        self.page_metadata = range_pages
+
+        try:
+            # Use existing save_all_pages_as_png with filtered metadata
+            saved_files = self.save_all_pages_as_png(dpi=dpi, skip_existing=skip_existing)
+        finally:
+            # Restore original metadata
+            self.page_metadata = original_metadata
 
         return saved_files
 
