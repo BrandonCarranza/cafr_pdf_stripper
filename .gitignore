@@ -205,3 +205,42 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ============================================
+# CAFR PDF Stripper - Project Specific
+# ============================================
+
+# Output files (generated PNG files and processed data)
+output/
+sections/
+vallejo_*/
+stockton_*/
+*.png
+
+# Input files (don't commit large PDFs)
+*.pdf
+pdfs/
+
+# TOC screenshots (personal/city-specific)
+toc_screenshots/
+toc_*.png
+
+# Cache directories
+cache/
+
+# Personal configuration
+config.local.yaml
+config.local.json
+credentials.json
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Processing logs
+processing_*.log
+cafr_*.log
