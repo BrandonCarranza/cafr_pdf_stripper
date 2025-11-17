@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime
+from multiprocessing import Pool, cpu_count
 
 import pdfplumber
 from PIL import Image
@@ -58,6 +59,51 @@ class PageMetadata:
     parent_section_name: Optional[str] = None
     png_file: Optional[str] = None
 
+
+# ==============================================================================
+# Multiprocessing Worker Functions
+# ==============================================================================
+
+def _convert_page_worker(task: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Worker function for multiprocessing page conversion.
+
+    Args:
+        task: Dictionary with:
+            - pdf_path: Path to PDF
+            - page_number: Page number to convert
+            - output_path: Where to save PNG
+            - dpi: DPI for conversion
+            - metadata_index: Index in page_metadata list
+
+    Returns:
+        Dictionary with output_path and metadata_index
+    """
+    from pdf2image import convert_from_path
+    from pathlib import Path
+
+    # Convert single page
+    images = convert_from_path(
+        task['pdf_path'],
+        dpi=task['dpi'],
+        first_page=task['page_number'],
+        last_page=task['page_number'],
+        thread_count=1
+    )
+
+    if not images:
+        raise ValueError(f"Failed to convert page {task['page_number']}")
+
+    # Save the image
+    output_path = Path(task['output_path'])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    images[0].save(output_path, 'PNG')
+
+    return {
+        'output_path': str(output_path),
+        'metadata_index': task['metadata_index']
+    }
 
 
 class PDFStripper:
@@ -712,6 +758,248 @@ class PDFStripper:
         return (most_specific_section.section_name,
                 most_specific_section.level,
                 parent_name)
+
+    def build_page_index(self, toc_entries: List[TOCEntry] = None) -> List[PageMetadata]:
+        """
+        Build complete page index for the PDF.
+
+        Iterates through all PDF pages and creates PageMetadata for each:
+        - Extracts footer page number
+        - Extracts header text
+        - Maps to TOC section
+        - Handles edge cases (pages before sections, missing numbers)
+
+        Args:
+            toc_entries: List of TOC entries (uses self.toc_entries if not provided)
+
+        Returns:
+            List of PageMetadata objects for all pages
+        """
+        if toc_entries is None:
+            toc_entries = self.toc_entries
+
+        page_count = self.get_page_count()
+        page_index = []
+
+        logger.info(f"Building page index for {page_count} pages...")
+
+        with pdfplumber.open(self.pdf_path) as pdf:
+            for pdf_page_num in range(1, page_count + 1):
+                # Progress indicator
+                if pdf_page_num % 10 == 0 or pdf_page_num == 1 or pdf_page_num == page_count:
+                    print(f"Processing page {pdf_page_num}/{page_count}...")
+
+                page = pdf.pages[pdf_page_num - 1]  # pdfplumber uses 0-based indexing
+
+                # Extract footer page number
+                footer_page_num = self.read_footer_page_number(page)
+
+                # Extract header text
+                header_text = self.read_header_text(page)
+
+                # Map to TOC section
+                # Need to convert footer page number to int for section mapping
+                section_name = None
+                section_level = 0
+                parent_section_name = None
+
+                if footer_page_num:
+                    # Convert footer page number to integer
+                    page_num_int = self._convert_page_to_int(footer_page_num)
+                    if page_num_int:
+                        # Map using the document page number
+                        section_name, section_level, parent_section_name = self.map_page_to_section(
+                            page_num_int, toc_entries
+                        )
+
+                # Create PageMetadata
+                metadata = PageMetadata(
+                    pdf_page_num=pdf_page_num,
+                    footer_page_num=footer_page_num,
+                    section_name=section_name,
+                    section_level=section_level,
+                    header_text=header_text,
+                    parent_section_name=parent_section_name,
+                    png_file=None  # Will be populated during PNG conversion
+                )
+
+                page_index.append(metadata)
+
+        # Store internally
+        self.page_metadata = page_index
+
+        logger.info(f"✓ Page index built: {len(page_index)} pages processed")
+
+        # Summary stats
+        pages_with_numbers = sum(1 for p in page_index if p.footer_page_num)
+        pages_with_sections = sum(1 for p in page_index if p.section_name)
+        pages_with_headers = sum(1 for p in page_index if p.header_text)
+
+        logger.info(f"  Pages with footer numbers: {pages_with_numbers}/{len(page_index)}")
+        logger.info(f"  Pages mapped to sections: {pages_with_sections}/{len(page_index)}")
+        logger.info(f"  Pages with header text: {pages_with_headers}/{len(page_index)}")
+
+        return page_index
+
+    def _create_section_slug(self, section_name: Optional[str]) -> str:
+        """
+        Create a URL-friendly slug from section name.
+
+        Args:
+            section_name: Section name to convert
+
+        Returns:
+            Lowercase slug with underscores (e.g., "financial_section")
+        """
+        if not section_name:
+            return "unsectioned"
+
+        # Remove leading/trailing whitespace
+        slug = section_name.strip()
+
+        # Convert to lowercase
+        slug = slug.lower()
+
+        # Replace spaces and special characters with underscores
+        slug = re.sub(r'[^\w\s-]', '', slug)
+        slug = re.sub(r'[-\s]+', '_', slug)
+
+        # Remove leading/trailing underscores
+        slug = slug.strip('_')
+
+        return slug if slug else "unsectioned"
+
+    def save_page_as_png(self, page_number: int, output_path: str, dpi: int = 300) -> str:
+        """
+        Convert a single PDF page to PNG.
+
+        Args:
+            page_number: PDF page number (1-based)
+            output_path: Path where PNG should be saved
+            dpi: DPI for PNG conversion (default 300)
+
+        Returns:
+            Path to saved PNG file
+        """
+        # Convert single page
+        images = convert_from_path(
+            self.pdf_path,
+            dpi=dpi,
+            first_page=page_number,
+            last_page=page_number,
+            thread_count=1
+        )
+
+        if not images:
+            raise ValueError(f"Failed to convert page {page_number}")
+
+        # Save the image
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        images[0].save(output_path, 'PNG')
+        logger.debug(f"Saved page {page_number} to {output_path}")
+
+        return str(output_path)
+
+    def save_all_pages_as_png(self, dpi: int = 300) -> List[str]:
+        """
+        Convert all PDF pages to PNG with section-based organization.
+
+        Creates directory structure:
+        output/
+        ├── 01_introductory_section/
+        │   ├── page_0001_introductory.png
+        │   └── ...
+        ├── 02_financial_section/
+        │   └── ...
+
+        Uses multiprocessing to convert pages in parallel (optimized for Threadripper).
+
+        Args:
+            dpi: DPI for PNG conversion (default 300)
+
+        Returns:
+            List of saved file paths
+        """
+        if not self.page_metadata:
+            raise ValueError("Page index not built. Call build_page_index() first.")
+
+        logger.info("=" * 60)
+        logger.info("Converting PDF pages to PNG")
+        logger.info("=" * 60)
+
+        # Determine optimal worker count (8-16 for Threadripper)
+        max_workers = min(16, max(8, cpu_count() // 2))
+        logger.info(f"Using {max_workers} parallel workers")
+
+        # Prepare conversion tasks
+        conversion_tasks = []
+        section_counters = {}  # Track section numbers for folder naming
+
+        # First pass: assign section numbers
+        for metadata in self.page_metadata:
+            if metadata.section_name and metadata.section_level == 1:
+                if metadata.section_name not in section_counters:
+                    section_counters[metadata.section_name] = len(section_counters) + 1
+
+        # Second pass: create conversion tasks
+        for metadata in self.page_metadata:
+            # Determine section folder
+            if metadata.section_name:
+                # Find the main section (level 1) for this page
+                main_section = metadata.section_name
+                if metadata.section_level > 1 and metadata.parent_section_name:
+                    # If this is a subsection, use the parent (main) section for folder
+                    main_section = metadata.parent_section_name
+
+                section_num = section_counters.get(main_section, 0)
+                section_slug = self._create_section_slug(main_section)
+                folder_name = f"{section_num:02d}_{section_slug}"
+            else:
+                folder_name = "00_unsectioned"
+
+            # Create filename
+            page_slug = self._create_section_slug(metadata.section_name)
+            filename = f"page_{metadata.pdf_page_num:04d}_{page_slug}.png"
+
+            # Full output path
+            output_path = self.output_dir / folder_name / filename
+
+            conversion_tasks.append({
+                'pdf_path': str(self.pdf_path),
+                'page_number': metadata.pdf_page_num,
+                'output_path': str(output_path),
+                'dpi': dpi,
+                'metadata_index': self.page_metadata.index(metadata)
+            })
+
+        # Convert pages using multiprocessing
+        logger.info(f"Converting {len(conversion_tasks)} pages at {dpi} DPI...")
+
+        saved_files = []
+
+        # Use multiprocessing pool
+        with Pool(processes=max_workers) as pool:
+            # Use tqdm for progress bar
+            with tqdm(total=len(conversion_tasks), desc="Converting pages", unit="page") as pbar:
+                for result in pool.imap(_convert_page_worker, conversion_tasks):
+                    saved_files.append(result['output_path'])
+                    # Update metadata with PNG file path
+                    self.page_metadata[result['metadata_index']].png_file = result['output_path']
+                    pbar.update(1)
+
+        logger.info(f"✓ Converted {len(saved_files)} pages to PNG")
+
+        # Summary by section
+        sections_created = set()
+        for task in conversion_tasks:
+            folder = Path(task['output_path']).parent.name
+            sections_created.add(folder)
+
+        logger.info(f"  Created {len(sections_created)} section folders")
+
+        return saved_files
 
     def process_cafr(self, toc_screenshots: List[str], dpi: int = 300) -> Dict[str, Any]:
         """
