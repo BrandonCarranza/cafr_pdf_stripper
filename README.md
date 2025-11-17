@@ -36,19 +36,29 @@ Transforms municipal CAFR PDFs into organized, analyzed datasets:
 
 ## Quick Start
 
-### Prerequisites
-- Python 3.12+
-- poppler-utils (for PDF processing)
-- tesseract-ocr (for TOC screenshot OCR)
-
 ### Installation
-```bash
-# Clone repository
-git clone https://github.com/BrandonCarranza/cafr_pdf_stripper.git
-cd cafr_pdf_stripper
 
-# Install dependencies
-pip install -r requirements.txt
+**Automated Setup (Recommended):**
+```bash
+./setup.sh
+```
+
+This automated script will:
+- ✅ Check system requirements (Python 3.11+, poppler-utils, tesseract-ocr)
+- ✅ Create virtual environment
+- ✅ Install all dependencies
+- ✅ Set up workspace directories
+- ✅ Run verification tests
+
+**Manual Installation:**
+
+See [INSTALL.md](INSTALL.md) for detailed installation instructions, troubleshooting, and manual setup steps.
+
+**Quick Verification:**
+```bash
+make test-quick
+# or
+python -c "import ibco_stripper; print('✓ Installation successful')"
 ```
 
 ### Usage
