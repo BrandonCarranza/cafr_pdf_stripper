@@ -73,12 +73,31 @@ OCR_CONFIG = {
 TOC_PARSING = {
     # Common patterns for TOC entries
     # Format: "Section Name .... Page Number"
+    # Ordered by specificity (most specific first)
     "patterns": [
-        r"(.+?)\s*\.{2,}\s*(\d+)",           # "Section .... 25"
-        r"(.+?)\s+Page\s+(\d+)",             # "Section Page 25"
-        r"(.+?)\s+(\d+)\s*$",                # "Section 25"
+        # Pattern 1: Numbered sections with dots/leaders and Arabic page numbers
         r"(\d+\.?\s+.+?)\s*\.{2,}\s*(\d+)",  # "1. Section .... 25"
+
+        # Pattern 2: Lettered sections with dots/leaders and Arabic page numbers
         r"([A-Z]\.?\s+.+?)\s*\.{2,}\s*(\d+)", # "A. Section .... 25"
+
+        # Pattern 3: Section with "Page" prefix (Roman or Arabic)
+        r"(.+?)\s+Page\s+([ivxlcdm\d]+)",   # "Section Page 25" or "Section Page iii"
+
+        # Pattern 4: Section with dots/leaders and Roman page numbers
+        r"(.+?)\s*\.{2,}\s*([ivxlcdm]+)\s*$",  # "Section .... iii"
+
+        # Pattern 5: Section with dots/leaders and Arabic page numbers (general)
+        r"(.+?)\s*\.{2,}\s*(\d+)",           # "Section .... 25"
+
+        # Pattern 6: Section with multiple spaces and Arabic page number
+        r"(.+?)\s{3,}(\d+)\s*$",             # "Section   25" (3+ spaces)
+
+        # Pattern 7: Section with multiple spaces and Roman page number
+        r"(.+?)\s{3,}([ivxlcdm]+)\s*$",      # "Section   iii" (3+ spaces)
+
+        # Pattern 8: Section with any spacing and page at end (fallback)
+        r"(.+?)\s+(\d+)\s*$",                # "Section 25" (general fallback)
     ],
 
     # Indentation levels (spaces)
@@ -89,6 +108,9 @@ TOC_PARSING = {
     # Section name cleaning
     "remove_numbers": False,  # Keep section numbers (1., A., etc.)
     "remove_dots": True,      # Remove leader dots
+
+    # Sorting
+    "sort_by_page": True,     # Sort TOC entries by page number
 }
 
 

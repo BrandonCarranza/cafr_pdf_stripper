@@ -316,12 +316,13 @@ class PDFStripper:
         - "Management's Discussion ... Page 25"
         - "1. Introductory Section ...... 1"
         - "A. Letter of Transmittal ..... 3"
+        - Roman numeral pages: "Introductory Section ... i"
 
         Args:
             ocr_text: Raw OCR text from TOC screenshot
 
         Returns:
-            List of TOCEntry objects
+            List of TOCEntry objects sorted by page number
         """
         toc_entries = []
         lines = ocr_text.split('\n')
@@ -336,11 +337,18 @@ class PDFStripper:
             if entry:
                 toc_entries.append(entry)
 
+        # Sort by page number if configured
+        if config.TOC_PARSING['sort_by_page'] and toc_entries:
+            toc_entries.sort(key=lambda e: e.page_number)
+
         return toc_entries
 
     def _parse_toc_line(self, line: str) -> Optional[TOCEntry]:
         """
         Parse a single line of TOC text into a TOCEntry.
+
+        Handles both Arabic numerals (1, 2, 3) and Roman numerals (i, ii, iii)
+        in page references.
 
         Args:
             line: Single line from TOC
@@ -362,7 +370,7 @@ class PDFStripper:
 
         # Try each pattern
         for pattern in patterns:
-            match = re.search(pattern, line)
+            match = re.search(pattern, line, re.IGNORECASE)
             if match:
                 # Extract section name and page number
                 section_name = match.group(1).strip()
@@ -373,14 +381,10 @@ class PDFStripper:
                     section_name = re.sub(r'\.+\s*$', '', section_name)
                     section_name = section_name.strip()
 
-                # Convert page number to integer
-                try:
-                    # Handle "Page 25" format
-                    if 'page' in page_str.lower():
-                        page_str = re.search(r'\d+', page_str).group()
+                # Convert page string to integer
+                page_number = self._convert_page_to_int(page_str)
 
-                    page_number = int(page_str)
-
+                if page_number is not None:
                     # Create TOC entry
                     return TOCEntry(
                         section_name=section_name,
@@ -389,9 +393,44 @@ class PDFStripper:
                         parent=None  # Will be set later if needed
                     )
 
-                except (ValueError, AttributeError):
-                    # Not a valid page number
-                    continue
+        return None
+
+    def _convert_page_to_int(self, page_str: str) -> Optional[int]:
+        """
+        Convert a page string to an integer.
+
+        Handles:
+        - Arabic numerals: "1", "25", "200"
+        - Roman numerals: "i", "ii", "iii", "iv", "v", etc.
+        - Page prefix: "Page 25"
+
+        Args:
+            page_str: Page number string
+
+        Returns:
+            Integer page number or None if invalid
+        """
+        page_str = page_str.strip()
+
+        # Handle "Page 25" or "Page iii" format
+        if 'page' in page_str.lower():
+            # Extract just the number/numeral part
+            match = re.search(r'([ivxlcdm\d]+)', page_str, re.IGNORECASE)
+            if match:
+                page_str = match.group(1)
+            else:
+                return None
+
+        # Try Arabic numeral first (most common)
+        try:
+            return int(page_str)
+        except ValueError:
+            pass
+
+        # Try Roman numeral
+        page_lower = page_str.lower()
+        if config.is_roman_numeral(page_lower):
+            return config.roman_to_int(page_lower)
 
         return None
 
