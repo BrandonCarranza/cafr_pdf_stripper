@@ -15,8 +15,9 @@ Built for the IBCo (Independent Budget & Capital Operations) transparency initia
 import argparse
 import json
 import logging
+import re
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
@@ -25,6 +26,8 @@ from PIL import Image
 import pytesseract
 from pdf2image import convert_from_path
 from tqdm import tqdm
+
+import config
 
 
 # Configure logging
@@ -104,26 +107,133 @@ class PDFStripper:
         """
         Extract page number from the bottom 10% of a page.
 
+        CAFR PDFs typically have page numbers centered in the footer.
+        Handles both Roman numerals (i, ii, iii) and Arabic numerals (1, 2, 3).
+
         Args:
             page: pdfplumber page object
 
         Returns:
-            Page number as string (e.g., "i", "ii", "1", "25") or None
+            Page number as string (e.g., "i", "ii", "1", "25") or None if not found
         """
-        # TODO: Implement in next prompt (1B)
-        return None
+        # Get footer region from config
+        footer_config = config.PDF_PROCESSING['footer_region']
+
+        # Calculate footer bounding box
+        page_height = page.height
+        footer_top = page_height * footer_config['top']
+        footer_bbox = (0, footer_top, page.width, page_height)
+
+        # Extract text from footer region
+        try:
+            footer_crop = page.crop(footer_bbox)
+            footer_text = footer_crop.extract_text()
+
+            if not footer_text:
+                return None
+
+            # Clean up the text
+            footer_text = footer_text.strip()
+
+            # Parse page number from footer text
+            page_num = self._parse_page_number(footer_text)
+
+            return page_num
+
+        except Exception as e:
+            logger.debug(f"Error reading footer on page: {e}")
+            return None
 
     def read_header_text(self, page) -> Optional[str]:
         """
         Extract text from the top 10% of a page.
 
+        CAFR headers usually contain section names, city name, or year.
+
         Args:
             page: pdfplumber page object
 
         Returns:
-            Header text or None
+            Header text or None if not found
         """
-        # TODO: Implement in next prompt (1B)
+        # Get header region from config
+        header_config = config.PDF_PROCESSING['header_region']
+
+        # Calculate header bounding box
+        page_height = page.height
+        header_bottom = page_height * header_config['bottom']
+        header_bbox = (0, 0, page.width, header_bottom)
+
+        # Extract text from header region
+        try:
+            header_crop = page.crop(header_bbox)
+            header_text = header_crop.extract_text()
+
+            if not header_text:
+                return None
+
+            # Clean up the text (remove extra whitespace, newlines)
+            header_text = ' '.join(header_text.split())
+            return header_text.strip()
+
+        except Exception as e:
+            logger.debug(f"Error reading header on page: {e}")
+            return None
+
+    def _parse_page_number(self, text: str) -> Optional[str]:
+        """
+        Parse page number from text string.
+
+        Handles:
+        - Roman numerals (i, ii, iii, iv, v, etc.)
+        - Arabic numerals (1, 2, 3, etc.)
+        - Page numbers with surrounding text/symbols
+
+        Args:
+            text: Text potentially containing a page number
+
+        Returns:
+            Page number as string or None
+        """
+        # Remove extra whitespace
+        text = text.strip()
+
+        # Pattern 1: Just a number (most common)
+        # Match standalone numbers
+        match = re.search(r'^\s*(\d+)\s*$', text)
+        if match:
+            return match.group(1)
+
+        # Pattern 2: Roman numerals (standalone)
+        # Match i, ii, iii, iv, v, vi, etc.
+        roman_pattern = r'^\s*([ivxlcdm]+)\s*$'
+        match = re.search(roman_pattern, text, re.IGNORECASE)
+        if match:
+            roman = match.group(1).lower()
+            # Verify it's a valid Roman numeral we recognize
+            if config.is_roman_numeral(roman):
+                return roman
+
+        # Pattern 3: Number with dash or other separators
+        # e.g., "- 25 -", "~ 3 ~"
+        match = re.search(r'[-~]\s*(\d+)\s*[-~]', text)
+        if match:
+            return match.group(1)
+
+        # Pattern 4: Number anywhere in the text
+        # Last resort: extract first number found
+        match = re.search(r'(\d+)', text)
+        if match:
+            return match.group(1)
+
+        # Pattern 5: Roman numeral anywhere in text
+        # Look for roman numerals in the text
+        match = re.search(r'\b([ivxlcdm]+)\b', text, re.IGNORECASE)
+        if match:
+            roman = match.group(1).lower()
+            if config.is_roman_numeral(roman):
+                return roman
+
         return None
 
     def load_toc_from_screenshot(self, image_path: str) -> List[TOCEntry]:
