@@ -1658,6 +1658,18 @@ class PDFStripper:
             "png_files_created": png_files_created,
             "metadata_file": metadata_file,
             "report_file": report_file,
+            "page_index": [
+                {
+                    "pdf_page_num": p.pdf_page_num,
+                    "footer_page_num": p.footer_page_num,
+                    "section_name": p.section_name,
+                    "section_level": p.section_level,
+                    "header_text": p.header_text,
+                    "parent_section_name": p.parent_section_name,
+                    "png_file": p.png_file
+                }
+                for p in self.page_metadata
+            ],
             "processed_date": datetime.now().isoformat(),
             "status": "complete"
         }
