@@ -1121,6 +1121,105 @@ class PDFStripper:
 
         return saved_files
 
+    def export_metadata(self, output_file: str = "cafr_metadata.json") -> str:
+        """
+        Export comprehensive metadata to JSON file.
+
+        Creates a JSON file containing:
+        - Source PDF information
+        - TOC entries
+        - Page metadata (all pages)
+        - Processing statistics
+
+        Args:
+            output_file: Path to output JSON file (default: "cafr_metadata.json")
+
+        Returns:
+            Path to created JSON file
+
+        Raises:
+            ValueError: If page_metadata not built or other validation errors
+        """
+        if not self.page_metadata:
+            raise ValueError("Page index not built. Call build_page_index() first.")
+
+        logger.info("=" * 60)
+        logger.info("Exporting metadata to JSON")
+        logger.info("=" * 60)
+
+        # Prepare output path
+        output_path = Path(output_file)
+        if not output_path.is_absolute():
+            output_path = self.output_dir / output_path
+
+        # Build metadata structure
+        metadata = {
+            "source_pdf": str(self.pdf_path),
+            "total_pages": len(self.page_metadata),
+            "processed_date": datetime.now().strftime("%Y-%m-%d"),
+            "toc_entries": [],
+            "pages": [],
+            "statistics": {}
+        }
+
+        # Export TOC entries
+        for entry in self.toc_entries:
+            toc_dict = {
+                "section_name": entry.section_name,
+                "page_number": entry.page_number,
+                "level": entry.level,
+                "parent": entry.parent
+            }
+            metadata["toc_entries"].append(toc_dict)
+
+        # Export page metadata
+        for page in self.page_metadata:
+            page_dict = {
+                "pdf_page": page.pdf_page_num,
+                "footer_page": page.footer_page_num,
+                "section": page.section_name,
+                "section_level": page.section_level,
+                "header_text": page.header_text,
+                "parent_section": page.parent_section_name,
+                "png_file": page.png_file
+            }
+            metadata["pages"].append(page_dict)
+
+        # Calculate statistics
+        pages_with_numbers = sum(1 for p in self.page_metadata if p.footer_page_num)
+        pages_without_numbers = len(self.page_metadata) - pages_with_numbers
+        pages_with_sections = sum(1 for p in self.page_metadata if p.section_name)
+        pages_without_sections = len(self.page_metadata) - pages_with_sections
+        png_files_created = sum(1 for p in self.page_metadata if p.png_file)
+
+        # Count sections by level
+        main_sections = len([e for e in self.toc_entries if e.level == 1])
+        subsections = len([e for e in self.toc_entries if e.level > 1])
+
+        metadata["statistics"] = {
+            "sections_count": len(self.toc_entries),
+            "main_sections": main_sections,
+            "subsections": subsections,
+            "pages_with_numbers": pages_with_numbers,
+            "pages_without_numbers": pages_without_numbers,
+            "pages_with_sections": pages_with_sections,
+            "pages_without_sections": pages_without_sections,
+            "png_files_created": png_files_created
+        }
+
+        # Write JSON file
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"✓ Metadata exported to: {output_path}")
+        logger.info(f"  Total pages: {metadata['total_pages']}")
+        logger.info(f"  TOC entries: {len(metadata['toc_entries'])}")
+        logger.info(f"  PNG files: {png_files_created}")
+
+        return str(output_path)
+
     def process_cafr(self, toc_screenshots: List[str], dpi: int = 300) -> Dict[str, Any]:
         """
         Process a complete CAFR PDF.
