@@ -1678,6 +1678,434 @@ class PDFStripper:
 
         return summary
 
+    def verify_processing(self, output_dir: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Verify the completeness and quality of processed CAFR output.
+
+        Performs comprehensive quality checks:
+        1. PNG file count matches page count
+        2. All sections have at least one page
+        3. No gaps in page sequences
+        4. File sizes reasonable (detect corrupted images)
+        5. Metadata JSON is valid
+        6. All TOC sections were found in PDF
+
+        Args:
+            output_dir: Directory to verify (default: self.output_dir)
+
+        Returns:
+            Verification report dictionary with status and issues
+        """
+        if output_dir is None:
+            output_dir = self.output_dir
+        else:
+            output_dir = Path(output_dir)
+
+        logger.info("=" * 60)
+        logger.info("CAFR Processing Verification")
+        logger.info("=" * 60)
+        logger.info(f"Verifying: {output_dir}")
+        logger.info("")
+
+        issues = []
+        warnings = []
+        checks_passed = 0
+        checks_total = 0
+
+        # Check 1: Page metadata exists
+        checks_total += 1
+        if not self.page_metadata:
+            issues.append("No page metadata found - run build_page_index() first")
+            logger.error("✗ Page metadata missing")
+        else:
+            checks_passed += 1
+            logger.info(f"✓ Page metadata loaded: {len(self.page_metadata)} pages")
+
+        # Check 2: Metadata JSON exists and is valid
+        checks_total += 1
+        metadata_path = output_dir / "cafr_metadata.json"
+        metadata_valid = False
+        metadata_data = None
+
+        if metadata_path.exists():
+            try:
+                with open(metadata_path, 'r') as f:
+                    metadata_data = json.load(f)
+                checks_passed += 1
+                metadata_valid = True
+                logger.info("✓ Metadata JSON exists and is valid")
+            except json.JSONDecodeError as e:
+                issues.append(f"Metadata JSON is corrupted: {e}")
+                logger.error(f"✗ Metadata JSON is corrupted: {e}")
+        else:
+            warnings.append("Metadata JSON not found (may not have been exported yet)")
+            logger.warning("⚠ Metadata JSON not found")
+
+        # Check 3: PNG files vs page count
+        checks_total += 1
+        sections_dir = output_dir / "sections"
+        png_files = []
+
+        if sections_dir.exists():
+            png_files = list(sections_dir.rglob("*.png"))
+            expected_png_count = len(self.page_metadata)
+
+            # Count pages that should have PNGs
+            pages_with_pngs = sum(1 for p in self.page_metadata if p.png_file)
+
+            if pages_with_pngs == 0:
+                warnings.append("No PNG files created (processing may have used --skip-png)")
+                logger.warning("⚠ No PNG files created")
+            elif len(png_files) == pages_with_pngs:
+                checks_passed += 1
+                logger.info(f"✓ PNG file count matches: {len(png_files)} files")
+            else:
+                issues.append(f"PNG count mismatch: expected {pages_with_pngs}, found {len(png_files)}")
+                logger.error(f"✗ PNG count mismatch: expected {pages_with_pngs}, found {len(png_files)}")
+        else:
+            warnings.append("Sections directory not found (processing may have used --skip-png)")
+            logger.warning("⚠ Sections directory not found")
+
+        # Check 4: All sections have at least one page
+        checks_total += 1
+        if self.toc_entries:
+            sections_with_pages = set()
+            for page in self.page_metadata:
+                if page.section_name:
+                    sections_with_pages.add(page.section_name)
+
+            toc_sections = set(entry.section_name for entry in self.toc_entries if entry.level == 1)
+            missing_sections = toc_sections - sections_with_pages
+
+            if not missing_sections:
+                checks_passed += 1
+                logger.info(f"✓ All {len(toc_sections)} main sections found in page index")
+            else:
+                issues.append(f"Sections without pages: {', '.join(missing_sections)}")
+                logger.error(f"✗ {len(missing_sections)} sections have no pages: {', '.join(list(missing_sections)[:3])}")
+        else:
+            warnings.append("No TOC entries loaded")
+            logger.warning("⚠ No TOC entries to verify")
+
+        # Check 5: Check for gaps in page sequences
+        checks_total += 1
+        page_numbers = sorted([p.footer_page_num for p in self.page_metadata if p.footer_page_num is not None])
+
+        if page_numbers:
+            gaps = []
+            for i in range(len(page_numbers) - 1):
+                if page_numbers[i+1] - page_numbers[i] > 1:
+                    gaps.append((page_numbers[i], page_numbers[i+1]))
+
+            if not gaps:
+                checks_passed += 1
+                logger.info(f"✓ No gaps in page number sequence ({len(page_numbers)} numbered pages)")
+            else:
+                warnings.append(f"Found {len(gaps)} gaps in page numbering")
+                logger.warning(f"⚠ {len(gaps)} gaps in page numbering: {gaps[:3]}")
+        else:
+            warnings.append("No footer page numbers found in PDF")
+            logger.warning("⚠ No footer page numbers found")
+
+        # Check 6: Pages without page numbers
+        checks_total += 1
+        pages_without_numbers = [p for p in self.page_metadata if p.footer_page_num is None]
+
+        if len(pages_without_numbers) == 0:
+            checks_passed += 1
+            logger.info("✓ All pages have footer page numbers")
+        else:
+            page_ranges = []
+            if pages_without_numbers:
+                start = pages_without_numbers[0].pdf_page_num
+                end = pages_without_numbers[0].pdf_page_num
+                for p in pages_without_numbers[1:]:
+                    if p.pdf_page_num == end + 1:
+                        end = p.pdf_page_num
+                    else:
+                        page_ranges.append(f"{start}-{end}" if start != end else str(start))
+                        start = p.pdf_page_num
+                        end = p.pdf_page_num
+                page_ranges.append(f"{start}-{end}" if start != end else str(start))
+
+            warnings.append(f"{len(pages_without_numbers)} pages without footer numbers (PDF pages: {', '.join(page_ranges)})")
+            logger.warning(f"⚠ {len(pages_without_numbers)} pages without footer numbers")
+
+        # Check 7: File sizes (detect corrupted or unusually small/large images)
+        checks_total += 1
+        if png_files:
+            file_sizes = [f.stat().st_size for f in png_files]
+            avg_size = sum(file_sizes) / len(file_sizes)
+            min_size = min(file_sizes)
+            max_size = max(file_sizes)
+
+            # Flag files that are unusually small (< 10% of average) or large (> 10x average)
+            suspicious_files = []
+            for f in png_files:
+                size = f.stat().st_size
+                if size < avg_size * 0.1 or size > avg_size * 10:
+                    suspicious_files.append((f.name, size))
+
+            if not suspicious_files:
+                checks_passed += 1
+                logger.info(f"✓ All PNG file sizes reasonable (avg: {avg_size/1024/1024:.1f} MB)")
+            else:
+                warnings.append(f"{len(suspicious_files)} PNG files have unusual sizes")
+                logger.warning(f"⚠ {len(suspicious_files)} PNG files have unusual sizes")
+        else:
+            # Skip this check if no PNGs
+            pass
+
+        # Check 8: Report file exists
+        checks_total += 1
+        report_path = output_dir / "cafr_report.txt"
+        if report_path.exists():
+            checks_passed += 1
+            logger.info("✓ Report file exists")
+        else:
+            warnings.append("Report file not found (may not have been generated yet)")
+            logger.warning("⚠ Report file not found")
+
+        # Calculate total size
+        total_size = 0
+        if sections_dir.exists():
+            for f in sections_dir.rglob("*"):
+                if f.is_file():
+                    total_size += f.stat().st_size
+
+        # Generate verification report
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("VERIFICATION REPORT")
+        logger.info("=" * 60)
+        logger.info(f"Checks Passed: {checks_passed}/{checks_total}")
+        logger.info(f"Issues: {len(issues)}")
+        logger.info(f"Warnings: {len(warnings)}")
+        logger.info("")
+
+        if issues:
+            logger.info("ISSUES:")
+            for issue in issues:
+                logger.info(f"  ✗ {issue}")
+            logger.info("")
+
+        if warnings:
+            logger.info("WARNINGS:")
+            for warning in warnings:
+                logger.info(f"  ⚠ {warning}")
+            logger.info("")
+
+        logger.info(f"Total pages: {len(self.page_metadata)}")
+        logger.info(f"PNG files: {len(png_files)}")
+        logger.info(f"Total size: {total_size / 1024 / 1024:.1f} MB")
+        logger.info("=" * 60)
+
+        verification_result = {
+            "status": "passed" if len(issues) == 0 else "failed",
+            "checks_passed": checks_passed,
+            "checks_total": checks_total,
+            "issues": issues,
+            "warnings": warnings,
+            "total_pages": len(self.page_metadata),
+            "png_files": len(png_files),
+            "total_size_mb": total_size / 1024 / 1024,
+            "metadata_valid": metadata_valid
+        }
+
+        return verification_result
+
+    def fix_issues(
+        self,
+        verification_result: Optional[Dict[str, Any]] = None,
+        reprocess_failed_pages: bool = True,
+        re_ocr_toc: bool = False,
+        toc_screenshots: Optional[List[str]] = None,
+        dpi: int = 300
+    ) -> Dict[str, Any]:
+        """
+        Attempt to fix issues found during verification.
+
+        Repair strategies:
+        1. Re-process pages that failed PNG conversion
+        2. Re-OCR TOC if sections are missing
+        3. Suggest manual intervention if automated fixes fail
+
+        Args:
+            verification_result: Result from verify_processing() (optional - will run verification if not provided)
+            reprocess_failed_pages: Attempt to re-generate missing PNG files
+            re_ocr_toc: Re-run TOC OCR if sections are missing
+            toc_screenshots: TOC screenshot paths (required if re_ocr_toc=True)
+            dpi: DPI for PNG conversion
+
+        Returns:
+            Fix report dictionary with actions taken and results
+        """
+        logger.info("=" * 60)
+        logger.info("CAFR Issue Repair")
+        logger.info("=" * 60)
+        logger.info("")
+
+        # Run verification if not provided
+        if verification_result is None:
+            logger.info("Running verification first...")
+            verification_result = self.verify_processing()
+            print()
+
+        issues_fixed = []
+        issues_remaining = []
+        manual_intervention_needed = []
+
+        # If no issues, nothing to fix
+        if verification_result["status"] == "passed" and not verification_result["issues"]:
+            logger.info("✓ No issues found - nothing to fix!")
+            return {
+                "status": "no_issues",
+                "issues_fixed": [],
+                "issues_remaining": [],
+                "manual_intervention_needed": []
+            }
+
+        # Fix 1: Re-process missing PNG files
+        if reprocess_failed_pages:
+            logger.info("Checking for missing PNG files...")
+
+            # Find pages that should have PNGs but don't
+            missing_pngs = []
+            sections_dir = self.output_dir / "sections"
+
+            for page in self.page_metadata:
+                if page.png_file:
+                    png_path = self.output_dir / page.png_file
+                    if not png_path.exists():
+                        missing_pngs.append(page)
+
+            if missing_pngs:
+                logger.info(f"Found {len(missing_pngs)} missing PNG files - attempting to regenerate...")
+
+                try:
+                    # Re-convert missing pages
+                    for page in missing_pngs:
+                        logger.info(f"  Re-processing PDF page {page.pdf_page_num}...")
+
+                        # Determine section directory
+                        if page.section_name:
+                            section_slug = page.section_name.lower().replace(' ', '_').replace('/', '_')
+                            section_dir = sections_dir / f"{page.section_level:02d}_{section_slug}"
+                        else:
+                            section_dir = sections_dir / "00_uncategorized"
+
+                        section_dir.mkdir(parents=True, exist_ok=True)
+
+                        # Convert page to PNG
+                        images = convert_from_path(
+                            str(self.pdf_path),
+                            dpi=dpi,
+                            first_page=page.pdf_page_num,
+                            last_page=page.pdf_page_num,
+                            thread_count=1
+                        )
+
+                        if images:
+                            # Generate filename
+                            if page.footer_page_num:
+                                filename = f"page_{page.footer_page_num:04d}.png"
+                            else:
+                                filename = f"page_pdf{page.pdf_page_num:04d}.png"
+
+                            output_path = section_dir / filename
+                            images[0].save(output_path, "PNG")
+
+                            # Update page metadata
+                            page.png_file = str(output_path.relative_to(self.output_dir))
+
+                    issues_fixed.append(f"Regenerated {len(missing_pngs)} missing PNG files")
+                    logger.info(f"✓ Regenerated {len(missing_pngs)} PNG files")
+
+                except Exception as e:
+                    issues_remaining.append(f"Failed to regenerate PNG files: {e}")
+                    logger.error(f"✗ Failed to regenerate PNG files: {e}")
+            else:
+                logger.info("✓ No missing PNG files found")
+
+        # Fix 2: Re-OCR TOC if sections are missing
+        if re_ocr_toc:
+            if not toc_screenshots:
+                manual_intervention_needed.append("Re-OCR requested but no TOC screenshots provided - use toc_screenshots parameter")
+                logger.warning("⚠ Re-OCR requested but no TOC screenshots provided")
+            else:
+                logger.info("Re-running TOC OCR...")
+
+                try:
+                    old_entry_count = len(self.toc_entries)
+                    self.toc_entries = self.load_toc_from_screenshots(toc_screenshots)
+                    new_entry_count = len(self.toc_entries)
+
+                    if new_entry_count > old_entry_count:
+                        issues_fixed.append(f"Re-OCR found {new_entry_count - old_entry_count} additional TOC entries")
+                        logger.info(f"✓ Re-OCR found {new_entry_count - old_entry_count} additional entries")
+
+                        # Rebuild page index with new TOC
+                        logger.info("Rebuilding page index with updated TOC...")
+                        self.build_page_index()
+                        logger.info("✓ Page index rebuilt")
+                    else:
+                        logger.info("⚠ Re-OCR did not find additional entries")
+                        issues_remaining.append("Re-OCR did not improve TOC - may need better screenshots")
+
+                except Exception as e:
+                    issues_remaining.append(f"Failed to re-OCR TOC: {e}")
+                    logger.error(f"✗ Failed to re-OCR TOC: {e}")
+
+        # Analyze remaining issues and suggest manual intervention
+        for issue in verification_result.get("issues", []):
+            if "PNG count mismatch" in issue and not reprocess_failed_pages:
+                manual_intervention_needed.append("PNG files missing - run fix_issues() with reprocess_failed_pages=True")
+            elif "Sections without pages" in issue and not re_ocr_toc:
+                manual_intervention_needed.append("Sections not mapped to pages - verify TOC screenshots are complete or run fix_issues() with re_ocr_toc=True")
+            elif "Metadata JSON is corrupted" in issue:
+                manual_intervention_needed.append("Metadata JSON is corrupted - re-run export_metadata()")
+            elif issue not in [f for f in issues_fixed]:
+                # Issue wasn't addressed by automated fixes
+                if "Sections without pages" not in issue and "PNG count mismatch" not in issue:
+                    issues_remaining.append(issue)
+
+        # Summary
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("REPAIR SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Issues Fixed: {len(issues_fixed)}")
+        logger.info(f"Issues Remaining: {len(issues_remaining)}")
+        logger.info(f"Manual Intervention Needed: {len(manual_intervention_needed)}")
+        logger.info("")
+
+        if issues_fixed:
+            logger.info("FIXED:")
+            for fix in issues_fixed:
+                logger.info(f"  ✓ {fix}")
+            logger.info("")
+
+        if issues_remaining:
+            logger.info("REMAINING:")
+            for issue in issues_remaining:
+                logger.info(f"  ✗ {issue}")
+            logger.info("")
+
+        if manual_intervention_needed:
+            logger.info("MANUAL INTERVENTION NEEDED:")
+            for suggestion in manual_intervention_needed:
+                logger.info(f"  ⚠ {suggestion}")
+            logger.info("")
+
+        logger.info("=" * 60)
+
+        return {
+            "status": "complete",
+            "issues_fixed": issues_fixed,
+            "issues_remaining": issues_remaining,
+            "manual_intervention_needed": manual_intervention_needed
+        }
+
 
 def main():
     """Main entry point for command-line usage."""
