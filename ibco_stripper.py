@@ -1476,32 +1476,57 @@ class PDFStripper:
 
         return ranges
 
-    def process_cafr(self, toc_screenshots: List[str], dpi: int = 300) -> Dict[str, Any]:
+    def process_cafr(
+        self,
+        toc_screenshots: List[str],
+        dpi: int = 300,
+        skip_png: bool = False,
+        section: Optional[str] = None,
+        verify_only: bool = False,
+        auto_confirm: bool = False
+    ) -> Dict[str, Any]:
         """
         Process a complete CAFR PDF.
+
+        Complete workflow:
+        1. Load PDF and TOC from screenshot(s)
+        2. Display TOC for user verification
+        3. Ask for confirmation to proceed (unless auto_confirm=True)
+        4. Build page index
+        5. Save pages as PNG (unless skip_png=True)
+        6. Export metadata JSON
+        7. Generate human-readable report
+        8. Print summary statistics
 
         Args:
             toc_screenshots: List of TOC screenshot paths
             dpi: DPI for PNG conversion (default 300)
+            skip_png: If True, skip PNG conversion (default False)
+            section: If provided, only process this section (default None = all)
+            verify_only: If True, only verify TOC and exit (default False)
+            auto_confirm: If True, skip user confirmation prompt (default False)
 
         Returns:
-            Processing summary
+            Processing summary dictionary
         """
         logger.info("=" * 60)
         logger.info("CAFR PDF Processing Started")
         logger.info("=" * 60)
 
-        # Get page count
+        # Step 1: Get page count
         page_count = self.get_page_count()
-        logger.info(f"PDF contains {page_count} pages")
+        logger.info(f"PDF: {self.pdf_path.name}")
+        logger.info(f"Total pages: {page_count}")
+        logger.info(f"Output directory: {self.output_dir}")
 
-        # Load TOC from multiple screenshots
+        # Step 2: Load TOC from screenshots
+        logger.info("")
         logger.info("Loading TOC from screenshots...")
         self.toc_entries = self.load_toc_from_screenshots(toc_screenshots)
+        logger.info(f"✓ Loaded {len(self.toc_entries)} TOC entries")
 
-        logger.info(f"Loaded {len(self.toc_entries)} TOC entries")
-
-        # Print TOC for review
+        # Step 3: Display TOC for review
+        print()
         self.print_toc()
 
         # Verify TOC completeness
@@ -1530,19 +1555,114 @@ class PDFStripper:
         print("=" * 80)
         print()
 
+        # If verify-only, stop here
+        if verify_only:
+            logger.info("Verify-only mode: Stopping after TOC verification")
+            return {
+                "pdf_file": str(self.pdf_path),
+                "total_pages": page_count,
+                "toc_entries": len(self.toc_entries),
+                "status": "verified_only"
+            }
+
+        # Step 4: Ask for confirmation (unless auto_confirm)
+        if not auto_confirm:
+            print("Proceed with processing?")
+            response = input("Enter 'yes' to continue, anything else to cancel: ").strip().lower()
+            if response != 'yes':
+                logger.info("Processing cancelled by user")
+                return {
+                    "pdf_file": str(self.pdf_path),
+                    "total_pages": page_count,
+                    "toc_entries": len(self.toc_entries),
+                    "status": "cancelled"
+                }
+            print()
+
+        # Step 5: Build page index
+        logger.info("=" * 60)
+        logger.info("Building page index...")
+        logger.info("=" * 60)
+        self.build_page_index()
+        logger.info(f"✓ Page index built: {len(self.page_metadata)} pages")
+        print()
+
+        # Step 6: Save pages as PNG (unless skip_png)
+        png_files_created = 0
+        if not skip_png:
+            logger.info("=" * 60)
+            logger.info("Converting pages to PNG...")
+            logger.info("=" * 60)
+
+            if section:
+                # Process only specific section
+                logger.info(f"Processing section: {section}")
+                png_files = self.save_section_as_png(section, dpi=dpi)
+            else:
+                # Process all pages
+                png_files = self.save_all_pages_as_png(dpi=dpi)
+
+            png_files_created = len(png_files)
+            logger.info(f"✓ PNG conversion complete: {png_files_created} files created")
+            print()
+        else:
+            logger.info("Skipping PNG conversion (--skip-png)")
+            print()
+
+        # Step 7: Export metadata JSON
+        logger.info("=" * 60)
+        logger.info("Exporting metadata...")
+        logger.info("=" * 60)
+        metadata_file = self.export_metadata()
+        logger.info(f"✓ Metadata exported: {Path(metadata_file).name}")
+        print()
+
+        # Step 8: Generate human-readable report
+        logger.info("=" * 60)
+        logger.info("Generating report...")
+        logger.info("=" * 60)
+        report_file = self.generate_report()
+        logger.info(f"✓ Report generated: {Path(report_file).name}")
+        print()
+
+        # Step 9: Print summary statistics
+        pages_with_numbers = sum(1 for p in self.page_metadata if p.footer_page_num)
+        pages_with_sections = sum(1 for p in self.page_metadata if p.section_name)
+        main_sections = len([e for e in self.toc_entries if e.level == 1])
+
+        print("=" * 80)
+        print("PROCESSING SUMMARY")
+        print("=" * 80)
+        print(f"PDF: {self.pdf_path.name}")
+        print(f"Total Pages: {page_count}")
+        print(f"TOC Entries: {len(self.toc_entries)} ({main_sections} main sections)")
+        print(f"Pages with Numbers: {pages_with_numbers}")
+        print(f"Pages Mapped to Sections: {pages_with_sections}")
+        print(f"PNG Files Created: {png_files_created}")
+        print()
+        print(f"Output Directory: {self.output_dir}")
+        print(f"  Metadata: {Path(metadata_file).name}")
+        print(f"  Report: {Path(report_file).name}")
+        if png_files_created > 0:
+            print(f"  PNG Files: {png_files_created} files in section directories")
+        print("=" * 80)
+        print()
+
         # Processing summary
         summary = {
             "pdf_file": str(self.pdf_path),
             "total_pages": page_count,
             "toc_entries": len(self.toc_entries),
+            "pages_with_numbers": pages_with_numbers,
+            "pages_with_sections": pages_with_sections,
+            "png_files_created": png_files_created,
+            "metadata_file": metadata_file,
+            "report_file": report_file,
             "processed_date": datetime.now().isoformat(),
-            "status": "initialized"
+            "status": "complete"
         }
 
-        logger.info("=" * 60)
-        logger.info("CAFR PDF Processing Summary")
-        logger.info("=" * 60)
-        logger.info(json.dumps(summary, indent=2))
+        logger.info("✓ CAFR processing complete!")
 
         return summary
 
@@ -1562,6 +1682,15 @@ Examples:
 
   # Specify DPI for PNG conversion
   %(prog)s --pdf report.pdf --toc toc.png --output output/ --dpi 300
+
+  # Only generate metadata (skip PNG conversion)
+  %(prog)s --pdf report.pdf --toc toc.png --output output/ --skip-png
+
+  # Process only one section
+  %(prog)s --pdf report.pdf --toc toc.png --output output/ --section "Financial Section"
+
+  # Verify TOC only (no processing)
+  %(prog)s --pdf report.pdf --toc toc.png --output output/ --verify-only
         """
     )
 
@@ -1592,9 +1721,28 @@ Examples:
     )
 
     parser.add_argument(
+        '--skip-png',
+        action='store_true',
+        help='Only generate metadata and reports, skip PNG conversion'
+    )
+
+    parser.add_argument(
+        '--section',
+        type=str,
+        default=None,
+        help='Process only the specified section (e.g., "Financial Section")'
+    )
+
+    parser.add_argument(
         '--verify-only',
         action='store_true',
         help='Only load and verify TOC, do not process'
+    )
+
+    parser.add_argument(
+        '--yes',
+        action='store_true',
+        help='Auto-confirm processing (skip confirmation prompt)'
     )
 
     parser.add_argument(
@@ -1614,13 +1762,29 @@ Examples:
         stripper = PDFStripper(args.pdf, args.output)
 
         # Process CAFR
-        summary = stripper.process_cafr(args.toc, dpi=args.dpi)
+        summary = stripper.process_cafr(
+            toc_screenshots=args.toc,
+            dpi=args.dpi,
+            skip_png=args.skip_png,
+            section=args.section,
+            verify_only=args.verify_only,
+            auto_confirm=args.yes
+        )
 
-        print("\nProcessing complete!")
-        print(f"Output directory: {args.output}")
+        # Print completion message
+        if summary["status"] == "complete":
+            print("✓ Processing complete!")
+        elif summary["status"] == "verified_only":
+            print("✓ Verification complete!")
+        elif summary["status"] == "cancelled":
+            print("Processing cancelled by user")
 
+    except KeyboardInterrupt:
+        print("\n\nProcessing interrupted by user")
+        return 130  # Standard exit code for SIGINT
     except Exception as e:
         logger.error(f"Error processing CAFR: {e}", exc_info=True)
+        print(f"\n✗ Error: {e}")
         return 1
 
     return 0
