@@ -55,7 +55,9 @@ class PageMetadata:
     section_name: Optional[str]
     section_level: int
     header_text: Optional[str]
+    parent_section_name: Optional[str] = None
     png_file: Optional[str] = None
+
 
 
 class PDFStripper:
@@ -618,6 +620,98 @@ class PDFStripper:
             print(f"Page range: {min(page_numbers)}-{max(page_numbers)}")
 
         print("=" * 80)
+
+    def map_page_to_section(self, page_number: int, toc_entries: List[TOCEntry] = None) -> Tuple[Optional[str], int, Optional[str]]:
+        """
+        Map a PDF page number to its TOC section.
+
+        Logic:
+        - A page belongs to a section if:
+          * page_number >= section start page
+          * AND page_number < next section start page
+          * OR page_number >= section start and no next section (last section)
+
+        - For hierarchical sections:
+          * Returns the most specific (deepest) section
+          * Stores parent section reference
+
+        Args:
+            page_number: Page number to map (document page number, not PDF sequential)
+            toc_entries: List of TOC entries (uses self.toc_entries if not provided)
+
+        Returns:
+            Tuple of (section_name, section_level, parent_section_name)
+            Returns (None, 0, None) if page not found in any section
+        """
+        if toc_entries is None:
+            toc_entries = self.toc_entries
+
+        if not toc_entries:
+            return (None, 0, None)
+
+        # Sort entries by page number (should already be sorted)
+        sorted_entries = sorted(toc_entries, key=lambda e: e.page_number)
+
+        # Find the section this page belongs to
+        # Start from the end and work backwards to find the section that starts at or before this page
+        matching_section = None
+        next_section_page = None
+
+        for i, entry in enumerate(sorted_entries):
+            # Check if this page is at or after this section's start
+            if page_number >= entry.page_number:
+                # Check if there's a next section
+                if i + 1 < len(sorted_entries):
+                    next_section_page = sorted_entries[i + 1].page_number
+                    # Page must be before the next section
+                    if page_number < next_section_page:
+                        matching_section = entry
+                        # Keep looking for more specific (higher level) sections
+                else:
+                    # This is the last section, page is in it
+                    matching_section = entry
+
+        if not matching_section:
+            return (None, 0, None)
+
+        # Now find the most specific subsection (highest level number)
+        # Look for subsections that start at or before this page
+        most_specific_section = matching_section
+        parent_section = None
+
+        for entry in sorted_entries:
+            # Only consider entries that start at or before our page
+            if entry.page_number <= page_number:
+                # Find next entry to determine end of this section
+                next_entry_idx = sorted_entries.index(entry) + 1
+                if next_entry_idx < len(sorted_entries):
+                    next_entry_page = sorted_entries[next_entry_idx].page_number
+                    if page_number >= next_entry_page:
+                        continue  # Page is after this section
+
+                # Check if this is a more specific section (higher level)
+                if entry.level > most_specific_section.level:
+                    # This is a subsection of our current section
+                    parent_section = most_specific_section
+                    most_specific_section = entry
+                elif entry.level == 1 and entry.page_number <= page_number:
+                    # Track the main section for parent reference
+                    if most_specific_section.level > 1:
+                        parent_section = entry
+
+        # Determine parent section name
+        parent_name = None
+        if most_specific_section.level > 1:
+            # Find the parent section (level - 1)
+            for entry in reversed(sorted_entries):
+                if (entry.level == most_specific_section.level - 1 and
+                    entry.page_number <= most_specific_section.page_number):
+                    parent_name = entry.section_name
+                    break
+
+        return (most_specific_section.section_name,
+                most_specific_section.level,
+                parent_name)
 
     def process_cafr(self, toc_screenshots: List[str], dpi: int = 300) -> Dict[str, Any]:
         """
