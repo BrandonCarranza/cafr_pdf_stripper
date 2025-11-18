@@ -1,0 +1,16 @@
+# IBCo CAFR PDF Stripper - Web Interface Dependencies
+#
+# Install with: pip install -r requirements_web.txt
+#
+# This file contains ONLY the additional dependencies for the web interface.
+# The base dependencies are in requirements.txt.
+#
+# Installation:
+#   pip install -r requirements.txt        # Install base dependencies first
+#   pip install -r requirements_web.txt    # Then install web dependencies
+
+# Streamlit - Web framework
+streamlit>=1.28.0
+
+# YAML support (for batch processing configs)
+pyyaml>=6.0

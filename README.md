@@ -133,9 +133,35 @@ make test
 
 **Troubleshooting installation issues?** See [INSTALL.md](INSTALL.md) for detailed troubleshooting and platform-specific notes.
 
+### Web Interface (Optional)
+
+**NEW:** Browser-based interface for easier processing!
+
+```bash
+# Install web interface dependencies
+pip install -r requirements_web.txt
+
+# Launch web UI
+streamlit run web_ui.py
+
+# Open browser to http://localhost:8501
+```
+
+**Features:**
+- 📤 Drag-and-drop file uploads
+- 📊 Real-time progress tracking
+- 📥 One-click download results
+- 🔄 Batch processing with visual feedback
+
+See [WEB_UI_README.md](WEB_UI_README.md) for complete web interface documentation.
+
 ---
 
 ## Quick Start Guide
+
+**Choose your interface:**
+- **Web UI:** Easy drag-and-drop (see [WEB_UI_README.md](WEB_UI_README.md))
+- **CLI:** Command-line for automation (instructions below)
 
 ### Step 1: Take TOC Screenshots
 
