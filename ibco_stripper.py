@@ -44,6 +44,7 @@ class TOCEntry:
     """Represents a table of contents entry."""
     section_name: str
     page_number: int
+    is_roman: bool = False  # True if page number was Roman numeral (i, ii, iii)
     level: int = 1  # 1=main section, 2=subsection
     parent: Optional[str] = None
 
@@ -58,6 +59,8 @@ class PageMetadata:
     header_text: Optional[str]
     parent_section_name: Optional[str] = None
     png_file: Optional[str] = None
+    zone_prefix: str = 's'  # Zone prefix: 'g' (general), 'r' (roman), 's' (standard/arabic)
+    zone_position: int = 0  # Sequential position within zone
 
 
 # ==============================================================================
@@ -227,6 +230,307 @@ class PDFStripper:
         except Exception as e:
             logger.debug(f"Error reading header on page: {e}")
             return None
+
+    def find_zone_anchors(self) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Find PDF page indices where Roman and Arabic numbering zones start.
+
+        Scans page footers to detect:
+        - roman_anchor: First page with Roman numeral footer (i, ii, iii, etc.)
+        - arabic_anchor: First page with Arabic numeral footer (1, 2, 3, etc.)
+
+        Returns:
+            Tuple of (roman_anchor, arabic_anchor)
+            - roman_anchor: PDF page index (1-based) where Roman section starts, or None
+            - arabic_anchor: PDF page index (1-based) where Arabic section starts, or None
+
+        Example:
+            If PDF has:
+              Pages 1-6: No footer
+              Pages 7-18: Roman numerals (i, ii, iii, ...)
+              Pages 19+: Arabic numerals (1, 2, 3, ...)
+            Returns: (7, 19)
+        """
+        page_count = self.get_page_count()
+        roman_anchor = None
+        arabic_anchor = None
+
+        logger.info("Detecting zone anchors by scanning page footers...")
+
+        with pdfplumber.open(self.pdf_path) as pdf:
+            for pdf_page_num in range(1, page_count + 1):
+                page = pdf.pages[pdf_page_num - 1]
+
+                # Extract footer page number
+                footer_page_num = self.read_footer_page_number(page)
+
+                if footer_page_num:
+                    # Check if it's Roman or Arabic
+                    page_result = self._convert_page_to_int(footer_page_num)
+                    if page_result:
+                        page_num, is_roman = page_result
+
+                        # Look for first Roman numeral
+                        if is_roman and roman_anchor is None:
+                            # Verify it's near the beginning (i, ii, or iii)
+                            if page_num <= 3:
+                                roman_anchor = pdf_page_num
+                                logger.info(f"  Roman anchor detected at PDF page {roman_anchor} (footer: {footer_page_num})")
+
+                        # Look for first Arabic numeral
+                        if not is_roman and arabic_anchor is None:
+                            # Verify it's near the beginning (1, 2, or 3)
+                            if page_num <= 3:
+                                arabic_anchor = pdf_page_num
+                                logger.info(f"  Arabic anchor detected at PDF page {arabic_anchor} (footer: {footer_page_num})")
+
+                # If we found both anchors, we can stop scanning
+                if roman_anchor is not None and arabic_anchor is not None:
+                    break
+
+        if roman_anchor is None:
+            logger.warning("⚠ No Roman numeral anchor found - assuming no Roman section")
+
+        if arabic_anchor is None:
+            logger.warning("⚠ No Arabic numeral anchor found - using page 1 as default")
+            arabic_anchor = 1  # Default to start of document
+
+        return (roman_anchor, arabic_anchor)
+
+    def assign_zone_positions(self, roman_anchor: Optional[int], arabic_anchor: Optional[int]) -> List[Dict[str, Any]]:
+        """
+        Assign zone prefix (g/r/s) and sequential position to each PDF page.
+
+        Zones:
+        - 'g' (Glossary/General): Pages before Roman section (cover, title pages, etc.)
+        - 'r' (Roman): Pages with Roman numeral footers (i, ii, iii, ...)
+        - 's' (Standard): Pages with Arabic numeral footers (1, 2, 3, ...)
+
+        Args:
+            roman_anchor: PDF page where Roman section starts (None if no Roman section)
+            arabic_anchor: PDF page where Arabic section starts
+
+        Returns:
+            List of dicts, one per PDF page, with structure:
+            {
+                'pdf_page': 1-based PDF page number,
+                'prefix': 'g', 'r', or 's',
+                'position': Sequential position within zone (1, 2, 3, ...)
+            }
+
+        Example:
+            If roman_anchor=7, arabic_anchor=19, total_pages=238:
+            Returns:
+              [{pdf_page: 1, prefix: 'g', position: 1},
+               {pdf_page: 2, prefix: 'g', position: 2},
+               ...
+               {pdf_page: 7, prefix: 'r', position: 1},
+               {pdf_page: 8, prefix: 'r', position: 2},
+               ...
+               {pdf_page: 19, prefix: 's', position: 1},
+               {pdf_page: 20, prefix: 's', position: 2},
+               ...
+               {pdf_page: 238, prefix: 's', position: 220}]
+        """
+        page_count = self.get_page_count()
+        zone_positions = []
+
+        g_counter = 1  # Counter for general/glossary pages
+        r_counter = 1  # Counter for Roman numeral pages
+        s_counter = 1  # Counter for standard/Arabic pages
+
+        logger.info("Assigning zone positions to all pages...")
+        logger.info(f"  Roman anchor: {roman_anchor if roman_anchor else 'None (no Roman section)'}")
+        logger.info(f"  Arabic anchor: {arabic_anchor}")
+
+        for pdf_page_num in range(1, page_count + 1):
+            # Determine which zone this page belongs to
+            if arabic_anchor and pdf_page_num >= arabic_anchor:
+                # Arabic/Standard section
+                prefix = 's'
+                position = s_counter
+                s_counter += 1
+            elif roman_anchor and pdf_page_num >= roman_anchor:
+                # Roman numeral section
+                prefix = 'r'
+                position = r_counter
+                r_counter += 1
+            else:
+                # General/Glossary section (before any numbered sections)
+                prefix = 'g'
+                position = g_counter
+                g_counter += 1
+
+            zone_positions.append({
+                'pdf_page': pdf_page_num,
+                'prefix': prefix,
+                'position': position
+            })
+
+        logger.info(f"  Zone summary: g={g_counter-1}, r={r_counter-1}, s={s_counter-1}")
+
+        return zone_positions
+
+    def build_toc_ranges(self, toc_entries: List[TOCEntry]) -> List[Dict[str, Any]]:
+        """
+        Convert TOC entries to zone-based ranges for section matching.
+
+        Each TOC entry gets converted to a range with zone prefix and positions.
+        The range extends from this entry's position to the next entry's position.
+
+        Args:
+            toc_entries: List of TOCEntry objects (must have is_roman field populated)
+
+        Returns:
+            List of range dicts with structure:
+            {
+                'section_name': Section name from TOC,
+                'level': Section level (1=main, 2=subsection),
+                'parent': Parent section name,
+                'prefix': Zone prefix ('r' or 's'),
+                'start_position': Starting position within zone,
+                'end_position': Ending position within zone (None for last section)
+            }
+
+        Example:
+            TOC entries:
+              - "Letter of Transmittal" page 1 (Roman)
+              - "Organizational Chart" page 12 (Roman)
+              - "Independent Auditor's Report" page 1 (Arabic)
+              - "Management Discussion" page 5 (Arabic)
+
+            Returns:
+              [{section_name: "Letter of Transmittal", prefix: 'r', start_position: 1, end_position: 11, ...},
+               {section_name: "Organizational Chart", prefix: 'r', start_position: 12, end_position: None, ...},
+               {section_name: "Independent Auditor's Report", prefix: 's', start_position: 1, end_position: 4, ...},
+               {section_name: "Management Discussion", prefix: 's', start_position: 5, end_position: None, ...}]
+        """
+        if not toc_entries:
+            logger.warning("No TOC entries to build ranges from")
+            return []
+
+        ranges = []
+
+        logger.info("Building TOC ranges from entries...")
+
+        # Group entries by zone (Roman vs Arabic)
+        roman_entries = [e for e in toc_entries if e.is_roman]
+        arabic_entries = [e for e in toc_entries if not e.is_roman]
+
+        # Sort each group by page number
+        roman_entries.sort(key=lambda e: e.page_number)
+        arabic_entries.sort(key=lambda e: e.page_number)
+
+        # Build ranges for Roman entries
+        for i, entry in enumerate(roman_entries):
+            # Determine end position (next entry's start - 1, or None for last entry)
+            if i + 1 < len(roman_entries):
+                end_position = roman_entries[i + 1].page_number - 1
+            else:
+                end_position = None  # Last Roman entry extends to end of Roman zone
+
+            ranges.append({
+                'section_name': entry.section_name,
+                'level': entry.level,
+                'parent': entry.parent,
+                'prefix': 'r',
+                'start_position': entry.page_number,
+                'end_position': end_position
+            })
+
+        # Build ranges for Arabic entries
+        for i, entry in enumerate(arabic_entries):
+            # Determine end position
+            if i + 1 < len(arabic_entries):
+                end_position = arabic_entries[i + 1].page_number - 1
+            else:
+                end_position = None  # Last Arabic entry extends to end of document
+
+            ranges.append({
+                'section_name': entry.section_name,
+                'level': entry.level,
+                'parent': entry.parent,
+                'prefix': 's',
+                'start_position': entry.page_number,
+                'end_position': end_position
+            })
+
+        logger.info(f"  Built {len(ranges)} ranges ({len(roman_entries)} Roman, {len(arabic_entries)} Arabic)")
+
+        return ranges
+
+    def map_zone_to_section(self, prefix: str, position: int, toc_ranges: List[Dict[str, Any]]) -> Tuple[Optional[str], int, Optional[str]]:
+        """
+        Map a zone position to its TOC section using range matching.
+
+        This replaces the old footer-based page matching with deterministic zone matching.
+
+        Args:
+            prefix: Zone prefix ('g', 'r', or 's')
+            position: Sequential position within the zone
+            toc_ranges: List of TOC ranges from build_toc_ranges()
+
+        Returns:
+            Tuple of (section_name, section_level, parent_section_name)
+            Returns (None, 0, None) if no matching section found
+
+        Example:
+            If prefix='r', position=12 and ranges include:
+              {prefix: 'r', start_position: 1, end_position: 11, section_name: "Letter..."}
+              {prefix: 'r', start_position: 12, end_position: None, section_name: "Org Chart..."}
+
+            Returns: ("Organizational Chart", 1, None)
+        """
+        # General/Glossary pages (before any TOC sections) get default name
+        if prefix == 'g':
+            return ("Before Table of Contents", 0, None)
+
+        # Find matching range for this zone and position
+        matching_range = None
+        most_specific_range = None
+
+        for toc_range in toc_ranges:
+            # Only consider ranges in the same zone
+            if toc_range['prefix'] != prefix:
+                continue
+
+            start = toc_range['start_position']
+            end = toc_range['end_position']
+
+            # Check if position falls in this range
+            in_range = False
+            if end is None:
+                # Last section in zone - extends to end
+                in_range = (position >= start)
+            else:
+                # Normal range
+                in_range = (start <= position <= end)
+
+            if in_range:
+                # Found a matching range
+                if matching_range is None:
+                    matching_range = toc_range
+                    most_specific_range = toc_range
+                else:
+                    # If multiple ranges match, prefer the most specific (highest level number)
+                    if toc_range['level'] > most_specific_range['level']:
+                        most_specific_range = toc_range
+
+        if most_specific_range:
+            return (
+                most_specific_range['section_name'],
+                most_specific_range['level'],
+                most_specific_range['parent']
+            )
+
+        # No matching section found - this shouldn't happen with proper ranges
+        # but provide a fallback
+        if prefix == 'r':
+            return ("Roman Numbered Section", 0, None)
+        elif prefix == 's':
+            return ("Arabic Numbered Section", 0, None)
+        else:
+            return (None, 0, None)
 
     def _parse_page_number(self, text: str) -> Optional[str]:
         """
@@ -429,34 +733,38 @@ class PDFStripper:
                     section_name = re.sub(r'\.+\s*$', '', section_name)
                     section_name = section_name.strip()
 
-                # Convert page string to integer
-                page_number = self._convert_page_to_int(page_str)
+                # Convert page string to integer and detect if Roman
+                page_result = self._convert_page_to_int(page_str)
 
-                if page_number is not None:
+                if page_result is not None:
+                    page_number, is_roman = page_result
                     # Create TOC entry
                     return TOCEntry(
                         section_name=section_name,
                         page_number=page_number,
+                        is_roman=is_roman,
                         level=level,
                         parent=None  # Will be set later if needed
                     )
 
         return None
 
-    def _convert_page_to_int(self, page_str: str) -> Optional[int]:
+    def _convert_page_to_int(self, page_str: str) -> Optional[Tuple[int, bool]]:
         """
-        Convert a page string to an integer.
+        Convert a page string to an integer and detect if it's Roman.
 
         Handles:
-        - Arabic numerals: "1", "25", "200"
-        - Roman numerals: "i", "ii", "iii", "iv", "v", etc.
+        - Arabic numerals: "1", "25", "200" -> (int, False)
+        - Roman numerals: "i", "ii", "iii", "iv", "v", etc. -> (int, True)
         - Page prefix: "Page 25"
 
         Args:
             page_str: Page number string
 
         Returns:
-            Integer page number or None if invalid
+            Tuple of (page_number, is_roman) or None if invalid
+            - page_number: Integer page number
+            - is_roman: True if original was Roman numeral, False if Arabic
         """
         page_str = page_str.strip()
 
@@ -471,14 +779,16 @@ class PDFStripper:
 
         # Try Arabic numeral first (most common)
         try:
-            return int(page_str)
+            page_num = int(page_str)
+            return (page_num, False)  # Arabic numeral
         except ValueError:
             pass
 
         # Try Roman numeral
         page_lower = page_str.lower()
         if config.is_roman_numeral(page_lower):
-            return config.roman_to_int(page_lower)
+            page_num = config.roman_to_int(page_lower)
+            return (page_num, True)  # Roman numeral
 
         return None
 
@@ -514,9 +824,11 @@ class PDFStripper:
 
         logger.info(f"Total entries after deduplication: {len(unique_entries)}")
 
-        # Sort by page number (should already be sorted, but ensure it)
+        # Sort by page number with Roman numerals before Arabic
+        # Sort key: (not is_roman, page_number) ensures Roman (True) comes before Arabic (False)
+        # because not True = False (sorts first) and not False = True (sorts second)
         if config.TOC_PARSING['sort_by_page']:
-            unique_entries.sort(key=lambda e: e.page_number)
+            unique_entries.sort(key=lambda e: (not e.is_roman, e.page_number))
 
         return unique_entries
 
@@ -761,19 +1073,24 @@ class PDFStripper:
 
     def build_page_index(self, toc_entries: List[TOCEntry] = None) -> List[PageMetadata]:
         """
-        Build complete page index for the PDF.
+        Build complete page index for the PDF using zone-based section mapping.
 
-        Iterates through all PDF pages and creates PageMetadata for each:
-        - Extracts footer page number
-        - Extracts header text
-        - Maps to TOC section
-        - Handles edge cases (pages before sections, missing numbers)
+        NEW APPROACH (Zone-based):
+        - One-time zone anchor detection (finds where Roman/Arabic sections start)
+        - Assigns zone positions (g/r/s + sequential number) to all pages
+        - Converts TOC entries to zone ranges
+        - Maps pages to sections using deterministic zone matching (no OCR dependency!)
+
+        OLD APPROACH (Footer-based - deprecated):
+        - OCR every page's footer (expensive, 5-10% success rate)
+        - Try to match footer number to TOC page numbers
+        - 90% of pages got section_name=None
 
         Args:
             toc_entries: List of TOC entries (uses self.toc_entries if not provided)
 
         Returns:
-            List of PageMetadata objects for all pages
+            List of PageMetadata objects for all pages with correct section assignments
         """
         if toc_entries is None:
             toc_entries = self.toc_entries
@@ -781,7 +1098,22 @@ class PDFStripper:
         page_count = self.get_page_count()
         page_index = []
 
-        logger.info(f"Building page index for {page_count} pages...")
+        logger.info(f"Building page index for {page_count} pages using zone-based matching...")
+
+        # ===== ONE-TIME SETUP (NEW ZONE-BASED APPROACH) =====
+
+        # Step 1: Find zone anchors (where Roman and Arabic sections start)
+        roman_anchor, arabic_anchor = self.find_zone_anchors()
+
+        # Step 2: Assign zone positions to all pages
+        zone_positions = self.assign_zone_positions(roman_anchor, arabic_anchor)
+
+        # Step 3: Build TOC ranges from entries
+        toc_ranges = self.build_toc_ranges(toc_entries)
+
+        logger.info("Zone-based setup complete. Processing pages...")
+
+        # ===== PER-PAGE PROCESSING =====
 
         with pdfplumber.open(self.pdf_path) as pdf:
             for pdf_page_num in range(1, page_count + 1):
@@ -791,36 +1123,33 @@ class PDFStripper:
 
                 page = pdf.pages[pdf_page_num - 1]  # pdfplumber uses 0-based indexing
 
-                # Extract footer page number
+                # Extract footer page number (still useful for debugging/verification)
                 footer_page_num = self.read_footer_page_number(page)
 
                 # Extract header text
                 header_text = self.read_header_text(page)
 
-                # Map to TOC section
-                # Need to convert footer page number to int for section mapping
-                section_name = None
-                section_level = 0
-                parent_section_name = None
+                # Get zone position for this page (deterministic from PDF index)
+                zone_info = zone_positions[pdf_page_num - 1]  # zone_positions is 0-indexed
+                prefix = zone_info['prefix']
+                position = zone_info['position']
 
-                if footer_page_num:
-                    # Convert footer page number to integer
-                    page_num_int = self._convert_page_to_int(footer_page_num)
-                    if page_num_int:
-                        # Map using the document page number
-                        section_name, section_level, parent_section_name = self.map_page_to_section(
-                            page_num_int, toc_entries
-                        )
+                # Map zone position to section using ranges (NO OCR NEEDED!)
+                section_name, section_level, parent_section_name = self.map_zone_to_section(
+                    prefix, position, toc_ranges
+                )
 
                 # Create PageMetadata
                 metadata = PageMetadata(
                     pdf_page_num=pdf_page_num,
-                    footer_page_num=footer_page_num,
+                    footer_page_num=footer_page_num,  # Keep for debugging
                     section_name=section_name,
                     section_level=section_level,
                     header_text=header_text,
                     parent_section_name=parent_section_name,
-                    png_file=None  # Will be populated during PNG conversion
+                    png_file=None,  # Will be populated during PNG conversion
+                    zone_prefix=prefix,  # Zone prefix (g/r/s)
+                    zone_position=position  # Sequential position within zone
                 )
 
                 page_index.append(metadata)
@@ -961,9 +1290,11 @@ class PDFStripper:
             else:
                 folder_name = "00_unsectioned"
 
-            # Create filename
+            # Create filename using zone position (NEW: zone-based naming)
+            # Format: {prefix}{position:04d}_{section_slug}.png
+            # Examples: r0001_letter_of_transmittal.png, s0128_schedule.png
             page_slug = self._create_section_slug(metadata.section_name)
-            filename = f"page_{metadata.pdf_page_num:04d}_{page_slug}.png"
+            filename = f"{metadata.zone_prefix}{metadata.zone_position:04d}_{page_slug}.png"
 
             # Full output path
             output_path = self.output_dir / folder_name / filename
